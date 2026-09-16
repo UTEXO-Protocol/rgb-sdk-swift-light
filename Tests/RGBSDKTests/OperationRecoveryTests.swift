@@ -22,6 +22,41 @@ import Testing
     #expect(checkpoint?.signedPsbtBase64 == fixture.signedPSBT)
 }
 
+@Test func backendDecoratorCannotSilentlyBypassRequiredPreflight() async throws {
+    let fixture = try RecoveryFixture(phase: .signed)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    let decorated = PreflightRejectingBackendDecorator(
+        wrapped: fixture.backend,
+        rejectAtCall: 2
+    )
+    let coordinator = OperationCoordinator(
+        configuration: fixture.configuration,
+        backend: decorated,
+        journal: fixture.journal,
+        now: { 1 }
+    )
+
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: fixture.backendContext,
+            signer: NeverSigner(),
+            request: fixture.request
+        )
+        Issue.record("expected the decorator's required preflight policy")
+    } catch let error as SDKError {
+        #expect(error.code == .unsupported)
+    }
+
+    #expect(await decorated.preflightCount == 2)
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+    #expect(
+        await fixture.journal.load(
+            walletID: fixture.configuration.walletID,
+            idempotencyKey: fixture.request.idempotencyKey
+        ) == fixture.initialCheckpoint
+    )
+}
+
 @Test func submittingCheckpointReconcilesWithoutPreparingOrResigning() async throws {
     let fixture = try RecoveryFixture(phase: .submitting)
     try await fixture.journal.save(fixture.initialCheckpoint)
@@ -149,6 +184,86 @@ import Testing
     #expect(await fixture.backend.prepareCount == 0)
     #expect(signer.preparedPSBTs == [fixture.preparedPSBT])
     #expect(await fixture.backend.submittedPSBTs == [fixture.signedPSBT])
+}
+
+@Test func expiryAfterSigningIsPersistedWithoutSubmitting() async throws {
+    let fixture = try RecoveryFixture(phase: .prepared)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    let signer = RecordingSigner(
+        signedPsbtBase64: fixture.signedPSBT,
+        validation: fixture.validation
+    )
+    let clock = StepClock([1_000, 1_000, 1_001])
+    let coordinator = OperationCoordinator(
+        configuration: fixture.configuration,
+        backend: fixture.backend,
+        journal: fixture.journal,
+        now: { clock.next() }
+    )
+
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: fixture.backendContext,
+            signer: signer,
+            request: fixture.request
+        )
+        Issue.record("expected the operation to expire after local signing")
+    } catch let error as SDKError {
+        #expect(error.code == .operationExpired)
+        #expect(error.operationID == fixture.operationID)
+    }
+
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+    let checkpoint = await fixture.journal.load(
+        walletID: fixture.configuration.walletID,
+        idempotencyKey: fixture.request.idempotencyKey
+    )
+    #expect(checkpoint?.phase == .terminal)
+    #expect(checkpoint?.signedPsbtBase64 == fixture.signedPSBT)
+    #expect(checkpoint?.validation == fixture.validation)
+    guard case let .expired(operationID) = checkpoint?.terminalOutcome else {
+        Issue.record("expected a durable expired outcome")
+        return
+    }
+    #expect(operationID == fixture.operationID)
+}
+
+@Test func expiryDuringPreSignPreflightNeverProducesASignature() async throws {
+    let fixture = try RecoveryFixture(phase: .prepared)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    let signer = RecordingSigner(
+        signedPsbtBase64: fixture.signedPSBT,
+        validation: fixture.validation
+    )
+    let clock = StepClock([1_000, 1_001])
+    let coordinator = OperationCoordinator(
+        configuration: fixture.configuration,
+        backend: fixture.backend,
+        journal: fixture.journal,
+        now: { clock.next() }
+    )
+
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: fixture.backendContext,
+            signer: signer,
+            request: fixture.request
+        )
+        Issue.record("expected expiry after the pre-sign policy suspension")
+    } catch let error as SDKError {
+        #expect(error.code == .operationExpired)
+        #expect(error.operationID == fixture.operationID)
+    }
+
+    #expect(signer.preparedPSBTs.isEmpty)
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+    let checkpoint = await fixture.journal.load(
+        walletID: fixture.configuration.walletID,
+        idempotencyKey: fixture.request.idempotencyKey
+    )
+    #expect(checkpoint?.phase == .terminal)
+    #expect(checkpoint?.signedPsbtBase64 == nil)
+    #expect(checkpoint?.validation == nil)
 }
 
 @Test func requestFeeRateIsAnAuthorizationCap() throws {
@@ -541,6 +656,7 @@ private actor RecoveryBackend: WalletBackend {
         self.session = session
     }
 
+    func preflightOperation(_ operation: OperationKind) async throws {}
     func setResult(_ result: BackendOperationResult) { self.result = result }
     func setStatus(_ status: BackendOperationStatus) { self.status = status }
     func cancelStatusLookup() { cancelNextStatusLookup = true }
@@ -575,6 +691,58 @@ private actor RecoveryBackend: WalletBackend {
             throw CancellationError()
         }
         return status ?? .pending(operationID: operationID, phase: "unknown")
+    }
+}
+
+private actor PreflightRejectingBackendDecorator: WalletBackend {
+    let wrapped: RecoveryBackend
+    let rejectAtCall: Int
+    private(set) var preflightCount = 0
+
+    init(wrapped: RecoveryBackend, rejectAtCall: Int) {
+        self.wrapped = wrapped
+        self.rejectAtCall = rejectAtCall
+    }
+
+    func preflightOperation(_ operation: OperationKind) async throws {
+        preflightCount += 1
+        if preflightCount >= rejectAtCall {
+            throw SDKError.unsupported("decorated backend money movement")
+        }
+    }
+
+    func initialize(_ request: BackendInitializeRequest) async throws -> BackendSession {
+        try await wrapped.initialize(request)
+    }
+
+    func registerWallet(_ request: RegisterWalletRequest) async throws {
+        try await wrapped.registerWallet(request)
+    }
+
+    func shutdown(session: BackendSession) async throws {
+        try await wrapped.shutdown(session: session)
+    }
+
+    func submitSignedTransaction(
+        _ request: SignedTransactionSubmission
+    ) async throws -> BackendOperationResult {
+        try await wrapped.submitSignedTransaction(request)
+    }
+}
+
+private final class StepClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [UInt64]
+
+    init(_ values: [UInt64]) {
+        self.values = values
+    }
+
+    func next() -> UInt64 {
+        lock.withLock {
+            guard !values.isEmpty else { return .max }
+            return values.removeFirst()
+        }
     }
 }
 
@@ -647,6 +815,7 @@ private actor BlockingBalanceBackend: WalletBackend {
 
     init(session: BackendSession) { self.session = session }
 
+    func preflightOperation(_ operation: OperationKind) async throws {}
     func initialize(_ request: BackendInitializeRequest) async throws -> BackendSession { session }
     func registerWallet(_ request: RegisterWalletRequest) async throws {}
     func shutdown(session: BackendSession) async throws {}

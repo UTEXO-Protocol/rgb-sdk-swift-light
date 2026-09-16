@@ -13,6 +13,10 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
     public let baseURL: URL
     public let network: Network
     public let allowInsecureLocalDevelopment: Bool
+    /// Explicit development-only opt-in for the provisional gateway PSBT
+    /// profile. This defaults off until backend fixtures and the exact
+    /// idempotency/reconciliation contract are frozen.
+    public let allowUnverifiedPsbtProfile: Bool
     public let requestTimeout: TimeInterval
     public let maximumPreparationTTL: TimeInterval
     public let maximumResponseBytes: Int
@@ -28,6 +32,7 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
         bearerToken: String,
         network: Network,
         allowInsecureLocalDevelopment: Bool = false,
+        allowUnverifiedPsbtProfile: Bool = false,
         requestTimeout: TimeInterval = 30,
         maximumPreparationTTL: TimeInterval = 3_600,
         maximumResponseBytes: Int = 1_048_576
@@ -95,6 +100,7 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
         self.bearerToken = bearerToken
         self.network = network
         self.allowInsecureLocalDevelopment = allowInsecureLocalDevelopment
+        self.allowUnverifiedPsbtProfile = allowUnverifiedPsbtProfile
         self.requestTimeout = requestTimeout
         self.maximumPreparationTTL = maximumPreparationTTL
         self.maximumResponseBytes = maximumResponseBytes
@@ -112,6 +118,7 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
                 "baseURL": baseURL.absoluteString,
                 "network": network.rawValue,
                 "allowInsecureLocalDevelopment": allowInsecureLocalDevelopment,
+                "allowUnverifiedPsbtProfile": allowUnverifiedPsbtProfile,
                 "bearerToken": "[REDACTED]",
             ],
             displayStyle: .struct
@@ -302,6 +309,7 @@ public actor GatewayWalletBackend: WalletBackend {
     }
 
     public func prepareSendBtc(_ request: PrepareSendBtcRequest) async throws -> PreparedTransaction {
+        try requireUnverifiedPsbtProfileOptIn()
         try requireContext(request.context.backend)
         guard !request.request.skipSync else {
             throw SDKError.unsupported("PR #174 gateway sendBtc skipSync=true")
@@ -359,15 +367,18 @@ public actor GatewayWalletBackend: WalletBackend {
     public func submitSignedTransaction(
         _ request: SignedTransactionSubmission
     ) async throws -> BackendOperationResult {
+        try requireUnverifiedPsbtProfileOptIn()
         try requireContext(request.context.backend)
         try validateCanonicalBase64(request.signedPsbtBase64, field: "signed PSBT")
         let body = CompleteBody(
             opId: request.operationID.value,
             signedPsbt: request.signedPsbtBase64
         )
-        // The gateway's idempotency scope is global per user, not per route.
-        // Domain-separated stage keys avoid prepare/complete conflicts while
-        // preserving one public logical idempotency key across Swift/Kotlin.
+        // Backend idempotency scope/replay semantics are not frozen. The
+        // provisional adapter domain-separates prepare/complete to avoid a
+        // potential cross-route collision while preserving one public logical
+        // key across Swift/Kotlin. The default-off profile gate prevents this
+        // temporary wire mapping from becoming an accidental release contract.
         let response: CompleteResponse = try await post(
             path: "/v1/onchain/send-btc/complete",
             body: body,
@@ -402,6 +413,25 @@ public actor GatewayWalletBackend: WalletBackend {
     ) async throws -> BackendOperationStatus {
         try requireContext(context)
         throw SDKError.unsupported("PR #174 gateway operation-status reconciliation")
+    }
+
+    public func preflightOperation(_ operation: OperationKind) async throws {
+        switch operation {
+        case .sendBtc:
+            try requireUnverifiedPsbtProfileOptIn()
+        case .createUtxos, .onchainSend, .inflate:
+            throw SDKError.unsupported(
+                "PR #174 gateway \(operation.rawValue) operation profile"
+            )
+        }
+    }
+
+    private func requireUnverifiedPsbtProfileOptIn() throws {
+        guard configuration.allowUnverifiedPsbtProfile else {
+            throw SDKError.unsupported(
+                "sendBtc requires an explicitly enabled, unverified gateway PSBT profile"
+            )
+        }
     }
 
     private func requireContext(_ context: BackendContext) throws {
@@ -692,14 +722,14 @@ private enum GatewayOperationStage: String, Sendable {
 }
 
 private struct GatewayIdempotency: Sendable {
-    private static let domain = "utexo.gateway.idempotency.v1"
+    private static let provisionalDomain = "utexo.gateway.idempotency.v1"
 
     let logicalKey: IdempotencyKey
     let stage: GatewayOperationStage
 
     var wireValue: String {
         var hasher = SHA256()
-        for field in [Self.domain, stage.rawValue, logicalKey.value] {
+        for field in [Self.provisionalDomain, stage.rawValue, logicalKey.value] {
             let bytes = Array(field.utf8)
             var length = UInt32(bytes.count).bigEndian
             withUnsafeBytes(of: &length) { hasher.update(bufferPointer: $0) }

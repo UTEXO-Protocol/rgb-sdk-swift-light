@@ -6,6 +6,13 @@ import Foundation
 /// separately shipped UTEXO backend transport module can implement it.
 @_spi(Backend)
 public protocol WalletBackend: Sendable {
+    /// Side-effect-free authorization/capability check performed immediately
+    /// before a workflow may prepare, sign, or submit an operation.
+    ///
+    /// This is required (with no default) so backend decorators cannot
+    /// accidentally bypass a wrapped backend's money-movement gate.
+    func preflightOperation(_ operation: OperationKind) async throws
+
     func initialize(_ request: BackendInitializeRequest) async throws -> BackendSession
     func registerWallet(_ request: RegisterWalletRequest) async throws
     func shutdown(session: BackendSession) async throws

@@ -33,6 +33,12 @@ surface but reject before contacting the backend. They require exact
 operation-specific owned-output/RGB contracts. Local RGB state validation is
 not implemented and cannot be inferred from a Bitcoin PSBT.
 
+The signer does guarantee that every `sendBtc` input belongs to the locally
+re-derived vanilla BIP86 account (external or change), never the colored
+account. That account-path guarantee is not proof that an outpoint has no RGB
+assignment: proving allocation-free UTXOs would require the RGB state evidence
+that this lightweight profile deliberately does not validate locally.
+
 ## Package integration
 
 The package supports iOS 15+ and macOS 13+ using Swift 6 strict concurrency.
@@ -61,6 +67,9 @@ let accountKeys = keys.accountXpubs
 
 The backend transport and operation journal use Swift SPI so infrastructure
 composition does not make prepared/signed PSBTs a normal app API.
+Every `WalletBackend` implementation or decorator must explicitly implement
+the required, side-effect-free `preflightOperation` SPI check; there is no
+default that can silently bypass a wrapped backend's money-movement policy.
 `OperationCheckpointCodec` provides the shared Swift/Kotlin `UTXOPCHK` v1
 encoding. A production journal must atomically encrypt and authenticate those
 opaque bytes. `InMemoryOperationJournal` is for tests and prototypes only.
@@ -72,6 +81,11 @@ application feature code must continue to call only `UTEXOWallet`. The adapter:
 
 - requires HTTPS by default; exact loopback HTTP for a local container requires
   the explicit `allowInsecureLocalDevelopment: true` configuration flag;
+- keeps `sendBtc` disabled by default. Development against the provisional
+  profile requires the explicit `allowUnverifiedPsbtProfile: true` SPI flag;
+  reads and watch-only registration remain available without that flag.
+  Disabling it later still permits durable terminal replay and status-only
+  reconciliation of an already-SUBMITTING operation;
 - refuses redirects, bounds request/response bodies, disables URLSession caches,
   cookies, and stored credentials, and never copies raw backend messages into
   log-safe SDK errors;
@@ -82,8 +96,9 @@ application feature code must continue to call only `UTEXOWallet`. The adapter:
 - binds the prepare response back to the original BTC recipient, amount, exact
   whole-sat fee rate, operation kind, null RGB/UTXO allowances, UUID, canonical
   Base64 PSBT, and a bounded future expiry before local signing;
-- derives separate `prepare` and `complete` HTTP idempotency keys from the one
-  public logical key using the shared Swift/Kotlin SHA-256 domain; and
+- provisionally derives separate `prepare` and `complete` HTTP idempotency keys
+  from the one public logical key using a shared Swift/Kotlin SHA-256 domain;
+  this adapter-local mapping is not part of the frozen public SDK contract; and
 - never retries completion blindly. A malformed/non-JSON 2xx completion or a
   result that cannot be bound to the locally validated transaction is reported
   as `operation.ambiguous`, because broadcast may already have happened.
@@ -109,12 +124,14 @@ the route omits account/keychain/index data needed for local re-derivation.
 produce the facade's authoritative completion fields. UTXO/transfer/asset-list
 shapes with missing fields and all RGB signing paths also remain fail-closed.
 
-The gateway has no `GET operation` status route. If completion becomes ambiguous,
-the durable coordinator reports `operation.ambiguous` and will not broadcast or
-complete again without authoritative status. Adding durable operation status is
-a backend release gate. The PR's current PSBT transaction/derivation profile must
-also be aligned with `utexo.psbt.bip86.v1` and proven with real gateway fixtures;
-otherwise the local signer correctly rejects it.
+Durable `GET operation` status has been promised by the backend team but is not
+present in the reviewed gateway contract. If completion becomes ambiguous, the
+durable coordinator reports `operation.ambiguous` and will not broadcast or
+complete again without authoritative status. The endpoint and its exact schema
+remain a backend release gate. The PR's current PSBT transaction/derivation
+profile must also be aligned with `utexo.psbt.bip86.v1` and proven with real
+gateway fixtures; until then money movement is default-off and the local signer
+will also reject any PSBT that violates its narrow policy.
 
 For this experimental pass the bearer token is private, redacted, and retained
 for the adapter lifetime. Loading and rotating it through an OS-backed credential

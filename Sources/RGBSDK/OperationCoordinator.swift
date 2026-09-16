@@ -11,10 +11,6 @@ struct OperationCoordinator: Sendable {
         signer: any LocalSigningEngine,
         request: SendBtcRequest
     ) async throws -> TransactionID {
-        guard request.feeRate <= configuration.signingPolicy.maximumFeeRate else {
-            throw SDKError.policyRejected("requested fee rate exceeds the app-owned limit")
-        }
-
         let hash = try RequestHasher.sendBtc(network: configuration.network, request: request)
         let context = OperationRequestContext(
             backend: backendContext,
@@ -36,15 +32,13 @@ struct OperationCoordinator: Sendable {
         }
         try verifyPrepared(prepared, context: context, operation: .sendBtc)
         try await save(prepared, phase: .prepared)
-        guard prepared.expiresAt.rawValue > now() else {
-            try await saveTerminal(
-                prepared: prepared,
-                signed: nil,
-                outcome: .expired(operationID: prepared.operationID)
-            )
-            throw SDKError.operationExpired(prepared.operationID)
-        }
+        try await rejectExpiredBeforeSigning(prepared)
 
+        // Prepare is a remote suspension point. Re-check a dynamic backend
+        // policy before local signing; denial leaves the exact PREPARED state
+        // recoverable and never advances toward submission.
+        try await preflightRiskyTransition(operation: .sendBtc, request: request)
+        try await rejectExpiredBeforeSigning(prepared)
         let signed = try signer.validateAndSign(
             prepared: prepared,
             request: request,
@@ -60,7 +54,8 @@ struct OperationCoordinator: Sendable {
         let result = try await submit(
             context: context,
             prepared: prepared,
-            signed: signed
+            signed: signed,
+            request: request
         )
         return try requireSendBtcResult(result, validation: signed.validation)
     }
@@ -77,6 +72,10 @@ struct OperationCoordinator: Sendable {
                 idempotencyKey: context.idempotencyKey
             )
         }) else {
+            // A new operation must pass an adapter's side-effect-free gate
+            // before even CREATED is persisted. A disabled provisional
+            // profile therefore leaves no misleading recovery state behind.
+            try await preflightRiskyTransition(operation: operation, request: request)
             try await journalCall {
                 try await journal.save(
                 .init(
@@ -118,20 +117,16 @@ struct OperationCoordinator: Sendable {
 
         switch checkpoint.phase {
         case .created:
+            try await preflightRiskyTransition(operation: operation, request: request)
             return nil
         case .prepared:
             guard let prepared = checkpoint.preparedTransaction else {
                 throw SDKError.invariant("prepared checkpoint has no exact preparation")
             }
             try verifyPrepared(prepared, context: context, operation: operation)
-            guard prepared.expiresAt.rawValue > now() else {
-                try await saveTerminal(
-                    prepared: prepared,
-                    signed: nil,
-                    outcome: .expired(operationID: prepared.operationID)
-                )
-                throw SDKError.operationExpired(prepared.operationID)
-            }
+            try await rejectExpiredBeforeSigning(prepared)
+            try await preflightRiskyTransition(operation: operation, request: request)
+            try await rejectExpiredBeforeSigning(prepared)
             let signed = try signer.validateAndSign(
                 prepared: prepared,
                 request: request,
@@ -146,7 +141,8 @@ struct OperationCoordinator: Sendable {
             let result = try await submit(
                 context: context,
                 prepared: prepared,
-                signed: signed
+                signed: signed,
+                request: request
             )
             return (result, signed.validation)
         case .signed:
@@ -164,10 +160,12 @@ struct OperationCoordinator: Sendable {
                 )
                 throw SDKError.operationExpired(prepared.operationID)
             }
+            try await preflightRiskyTransition(operation: operation, request: request)
             let result = try await submit(
                 context: context,
                 prepared: prepared,
-                signed: .init(signedPsbtBase64: signedPsbtBase64, validation: validation)
+                signed: .init(signedPsbtBase64: signedPsbtBase64, validation: validation),
+                request: request
             )
             return (result, validation)
         case .submitting:
@@ -188,12 +186,39 @@ struct OperationCoordinator: Sendable {
         }
     }
 
+    private func preflightRiskyTransition(
+        operation: OperationKind,
+        request: SendBtcRequest
+    ) async throws {
+        // Terminal outcomes must always replay and SUBMITTING must always be
+        // allowed to perform status-only reconciliation after a restart, even
+        // if a provisional profile has since been disabled or an app-owned
+        // policy has changed. Callers invoke this hook only for phases that
+        // could prepare, sign, or submit.
+        guard request.feeRate <= configuration.signingPolicy.maximumFeeRate else {
+            throw SDKError.policyRejected("requested fee rate exceeds the app-owned limit")
+        }
+        try await backendCall {
+            try await backend.preflightOperation(operation)
+        }
+    }
+
     private func submit(
         context: OperationRequestContext,
         prepared: PreparedTransaction,
-        signed: LocalSigningResult
+        signed: LocalSigningResult,
+        request: SendBtcRequest
     ) async throws -> BackendOperationResult {
         let operationID = prepared.operationID
+        // Signing and an earlier preflight may take time or cross an actor
+        // suspension. Preserve an already-known expiry before consulting a
+        // dynamic backend gate, then re-run that side-effect-free policy. A
+        // final expiry check closes the suspension window immediately before
+        // recording SUBMITTING. A gate failure leaves the checkpoint SIGNED;
+        // expiry is terminal and retains the exact signed payload.
+        try await rejectExpiredBeforeSubmission(prepared: prepared, signed: signed)
+        try await preflightRiskyTransition(operation: .sendBtc, request: request)
+        try await rejectExpiredBeforeSubmission(prepared: prepared, signed: signed)
         let preparedCheckpoint = try OperationCheckpoint(
             walletID: configuration.walletID,
             idempotencyKey: context.idempotencyKey,
@@ -301,6 +326,33 @@ struct OperationCoordinator: Sendable {
         // propagated above this boundary. The current terminal journal model
         // cannot encode those blockers, and neither condition authorizes an
         // automatic repeat of the completion request.
+    }
+
+    private func rejectExpiredBeforeSubmission(
+        prepared: PreparedTransaction,
+        signed: LocalSigningResult
+    ) async throws {
+        let operationID = prepared.operationID
+        guard prepared.expiresAt.rawValue > now() else {
+            try await saveTerminal(
+                prepared: prepared,
+                signed: signed,
+                outcome: .expired(operationID: operationID)
+            )
+            throw SDKError.operationExpired(operationID)
+        }
+    }
+
+    private func rejectExpiredBeforeSigning(_ prepared: PreparedTransaction) async throws {
+        let operationID = prepared.operationID
+        guard prepared.expiresAt.rawValue > now() else {
+            try await saveTerminal(
+                prepared: prepared,
+                signed: nil,
+                outcome: .expired(operationID: operationID)
+            )
+            throw SDKError.operationExpired(operationID)
+        }
     }
 
     private func reconcile(

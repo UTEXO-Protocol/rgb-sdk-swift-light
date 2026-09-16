@@ -55,6 +55,263 @@ import Testing
     #expect(!reflectedValues.contains(where: { $0.contains("do-not-log-this-token") }))
 }
 
+@Test func gatewayUnverifiedPsbtProfileIsDefaultOffBeforeJournalAndHttp() async throws {
+    let configuration = try GatewayBackendConfiguration(
+        baseURL: #require(URL(string: "http://127.0.0.1:8480")),
+        bearerToken: "unit-token",
+        network: .regtest,
+        allowInsecureLocalDevelopment: true
+    )
+    #expect(!configuration.allowUnverifiedPsbtProfile)
+
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_profile_gate","createdAt":1}"#),
+    ])
+    let backend = GatewayWalletBackend(configuration: configuration, transport: transport)
+    let walletID = try WalletID("wallet-profile-gate")
+    let session = try await backend.initialize(
+        .init(
+            walletID: walletID,
+            network: .regtest,
+            minimumAPIVersion: 1,
+            maximumAPIVersion: 1
+        )
+    )
+    let backendContext = BackendContext(
+        session: session,
+        walletID: walletID,
+        network: .regtest
+    )
+    let operationContext = try gatewayOperationContext(
+        backend: backendContext,
+        key: "profile-gate"
+    )
+    let send = try SendBtcRequest(
+        address: BitcoinAddress("bcrt1pprofilegateaddress"),
+        amount: Satoshis(10_000),
+        feeRate: FeeRate(milliSatsPerVByte: 2_000),
+        idempotencyKey: IdempotencyKey("profile-gate")
+    )
+
+    do {
+        _ = try await backend.prepareSendBtc(.init(context: operationContext, request: send))
+        Issue.record("expected the provisional PSBT profile gate")
+    } catch let error as SDKError {
+        #expect(error.code == .unsupported)
+        #expect(
+            error.details["feature"]
+                == "sendBtc requires an explicitly enabled, unverified gateway PSBT profile"
+        )
+    }
+
+    let submission = try gatewaySignedSubmission(
+        backend: backendContext,
+        operationID: OperationID("12121212-1212-4212-8212-121212121212"),
+        txid: String(repeating: "c", count: 64)
+    )
+    do {
+        _ = try await backend.submitSignedTransaction(submission)
+        Issue.record("expected completion to retain the provisional PSBT profile gate")
+    } catch let error as SDKError {
+        #expect(error.code == .unsupported)
+    }
+
+    let journal = InMemoryOperationJournal()
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: walletID, network: .regtest),
+        backend: backend,
+        journal: journal,
+        now: { 1 }
+    )
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: backendContext,
+            signer: GatewayNeverSigner(),
+            request: send
+        )
+        Issue.record("expected coordinator preflight to reject the provisional profile")
+    } catch let error as SDKError {
+        #expect(error.code == .unsupported)
+    }
+    #expect(await journal.load(walletID: walletID, idempotencyKey: send.idempotencyKey) == nil)
+    #expect(await transport.snapshot().count == 1)
+}
+
+@Test func gatewayPreflightExplicitlyRejectsEveryNonSendOperation() async throws {
+    let backend = GatewayWalletBackend(configuration: try gatewayConfiguration())
+
+    for operation in [OperationKind.createUtxos, .onchainSend, .inflate] {
+        do {
+            try await backend.preflightOperation(operation)
+            Issue.record("expected unsupported gateway profile for \(operation.rawValue)")
+        } catch let error as SDKError {
+            #expect(error.code == .unsupported)
+            #expect(error.details["feature"]?.contains(operation.rawValue) == true)
+        }
+    }
+}
+
+@Test func gatewayTerminalSuccessReplaysAfterProfileAndFeePolicyChange() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_terminal_replay","createdAt":1}"#),
+    ])
+    let configuration = try gatewayConfiguration(allowUnverifiedPsbtProfile: false)
+    let backend = GatewayWalletBackend(configuration: configuration, transport: transport)
+    let walletID = try WalletID("wallet-terminal-replay")
+    let session = try await backend.initialize(
+        .init(
+            walletID: walletID,
+            network: .regtest,
+            minimumAPIVersion: 1,
+            maximumAPIVersion: 1
+        )
+    )
+    let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+    let request = try gatewayRecoveryRequest(key: "terminal-replay")
+    let operationID = try OperationID("13131313-1313-4313-8313-131313131313")
+    let txid = try TransactionID(String(repeating: "d", count: 64))
+    let checkpoint = try gatewayRecoveryCheckpoint(
+        phase: .terminal,
+        walletID: walletID,
+        request: request,
+        operationID: operationID,
+        txid: txid
+    )
+    let journal = InMemoryOperationJournal()
+    try await journal.save(checkpoint)
+    let tightenedPolicy = try LocalSigningPolicy(
+        maximumFeeRate: FeeRate(milliSatsPerVByte: 1_000)
+    )
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(
+            walletID: walletID,
+            network: .regtest,
+            signingPolicy: tightenedPolicy
+        ),
+        backend: backend,
+        journal: journal,
+        now: { 1 }
+    )
+
+    let replayed = try await coordinator.sendBtc(
+        backendContext: context,
+        signer: GatewayNeverSigner(),
+        request: request
+    )
+
+    #expect(replayed == txid)
+    #expect(
+        await journal.load(walletID: walletID, idempotencyKey: request.idempotencyKey)
+            == checkpoint
+    )
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me"])
+}
+
+@Test func gatewaySignedRecoveryRemainsSignedWhenProfileIsDisabled() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_signed_recovery","createdAt":1}"#),
+    ])
+    let configuration = try gatewayConfiguration(allowUnverifiedPsbtProfile: false)
+    let backend = GatewayWalletBackend(configuration: configuration, transport: transport)
+    let walletID = try WalletID("wallet-signed-recovery")
+    let session = try await backend.initialize(
+        .init(
+            walletID: walletID,
+            network: .regtest,
+            minimumAPIVersion: 1,
+            maximumAPIVersion: 1
+        )
+    )
+    let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+    let request = try gatewayRecoveryRequest(key: "signed-recovery")
+    let operationID = try OperationID("15151515-1515-4515-8515-151515151515")
+    let checkpoint = try gatewayRecoveryCheckpoint(
+        phase: .signed,
+        walletID: walletID,
+        request: request,
+        operationID: operationID,
+        txid: TransactionID(String(repeating: "f", count: 64))
+    )
+    let journal = InMemoryOperationJournal()
+    try await journal.save(checkpoint)
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: walletID, network: .regtest),
+        backend: backend,
+        journal: journal,
+        now: { 1 }
+    )
+
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: context,
+            signer: GatewayNeverSigner(),
+            request: request
+        )
+        Issue.record("expected the disabled provisional profile to block submission")
+    } catch let error as SDKError {
+        #expect(error.code == .unsupported)
+    }
+
+    #expect(
+        await journal.load(walletID: walletID, idempotencyKey: request.idempotencyKey)
+            == checkpoint
+    )
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me"])
+}
+
+@Test func gatewaySubmittingRecoveryRemainsAmbiguousAfterProfileIsDisabled() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_submitting_recovery","createdAt":1}"#),
+    ])
+    let configuration = try gatewayConfiguration(allowUnverifiedPsbtProfile: false)
+    let backend = GatewayWalletBackend(configuration: configuration, transport: transport)
+    let walletID = try WalletID("wallet-submitting-recovery")
+    let session = try await backend.initialize(
+        .init(
+            walletID: walletID,
+            network: .regtest,
+            minimumAPIVersion: 1,
+            maximumAPIVersion: 1
+        )
+    )
+    let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+    let request = try gatewayRecoveryRequest(key: "submitting-recovery")
+    let operationID = try OperationID("14141414-1414-4414-8414-141414141414")
+    let checkpoint = try gatewayRecoveryCheckpoint(
+        phase: .submitting,
+        walletID: walletID,
+        request: request,
+        operationID: operationID,
+        txid: TransactionID(String(repeating: "e", count: 64))
+    )
+    let journal = InMemoryOperationJournal()
+    try await journal.save(checkpoint)
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: walletID, network: .regtest),
+        backend: backend,
+        journal: journal,
+        now: { 1 }
+    )
+
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: context,
+            signer: GatewayNeverSigner(),
+            request: request
+        )
+        Issue.record("expected status-only recovery to remain ambiguous without the endpoint")
+    } catch let error as SDKError {
+        #expect(error.code == .operationAmbiguous)
+        #expect(error.operationID == operationID)
+    }
+
+    #expect(
+        await journal.load(walletID: walletID, idempotencyKey: request.idempotencyKey)
+            == checkpoint
+    )
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me"])
+}
+
 @Test func gatewayCredentialRemainsBoundToOneWalletAcrossSessions() async throws {
     let transport = GatewayStubTransport(responses: [
         gatewayResponse(#"{"userId":"u_bound","createdAt":1}"#),
@@ -822,12 +1079,73 @@ import Testing
     #expect(await transport.snapshot().count == 1)
 }
 
-private func gatewayConfiguration(token: String = "unit-token") throws -> GatewayBackendConfiguration {
+private func gatewayConfiguration(
+    token: String = "unit-token",
+    allowUnverifiedPsbtProfile: Bool = true
+) throws -> GatewayBackendConfiguration {
     try GatewayBackendConfiguration(
         baseURL: #require(URL(string: "http://127.0.0.1:8480")),
         bearerToken: token,
         network: .regtest,
-        allowInsecureLocalDevelopment: true
+        allowInsecureLocalDevelopment: true,
+        allowUnverifiedPsbtProfile: allowUnverifiedPsbtProfile
+    )
+}
+
+private func gatewayRecoveryRequest(key: String) throws -> SendBtcRequest {
+    try SendBtcRequest(
+        address: BitcoinAddress("bcrt1precoveryaddress"),
+        amount: Satoshis(10_000),
+        feeRate: FeeRate(milliSatsPerVByte: 2_000),
+        idempotencyKey: IdempotencyKey(key)
+    )
+}
+
+private func gatewayRecoveryCheckpoint(
+    phase: OperationPhase,
+    walletID: WalletID,
+    request: SendBtcRequest,
+    operationID: OperationID,
+    txid: TransactionID
+) throws -> OperationCheckpoint {
+    let requestHash = try RequestHasher.sendBtc(network: .regtest, request: request)
+    let prepared = try PreparedTransaction(
+        operationID: operationID,
+        idempotencyKey: request.idempotencyKey,
+        requestHash: requestHash,
+        network: .regtest,
+        operation: .sendBtc,
+        psbtBase64: "prepared-psbt",
+        expiresAt: .init(rawValue: 1_001)
+    )
+    let validation = try LocalValidationReport(
+        psbtSHA256: String(repeating: "a", count: 64),
+        intentSHA256: String(repeating: "b", count: 64),
+        unsignedTxid: txid,
+        totalInput: Satoshis(20_000),
+        totalOutput: Satoshis(19_000),
+        fee: Satoshis(1_000),
+        estimatedVbytes: 100,
+        feeRate: FeeRate(milliSatsPerVByte: 10_000),
+        externalOutput: Satoshis(10_000),
+        change: Satoshis(9_000),
+        inputCount: 1,
+        outputCount: 2,
+        opReturnCount: 0
+    )
+    return try OperationCheckpoint(
+        walletID: walletID,
+        idempotencyKey: request.idempotencyKey,
+        requestHash: requestHash,
+        operationKind: .sendBtc,
+        phase: phase,
+        operationID: operationID,
+        preparedTransaction: prepared,
+        signedPsbtBase64: "signed-psbt",
+        validation: validation,
+        terminalOutcome: phase == .terminal
+            ? .succeeded(.sendBtc(operationID: operationID, txid: txid))
+            : nil
     )
 }
 
@@ -924,6 +1242,26 @@ private actor GatewayStubTransport: GatewayHTTPTransport {
     }
 
     func snapshot() -> [GatewayHTTPRequest] { requests }
+}
+
+private struct GatewayNeverSigner: LocalSigningEngine {
+    let capabilities = WalletCapabilities.locked
+
+    func identity() throws -> WalletIdentity {
+        throw SDKError.invariant("unexpected identity")
+    }
+
+    func verifyReservedAddress(_ reservation: ReservedAddress) throws {
+        throw SDKError.invariant("unexpected address verification")
+    }
+
+    func validateAndSign(
+        prepared: PreparedTransaction,
+        request: SendBtcRequest,
+        policy: LocalSigningPolicy
+    ) throws -> LocalSigningResult {
+        throw SDKError.invariant("unexpected signing")
+    }
 }
 
 private actor GatewayInitializeBarrierTransport: GatewayHTTPTransport {

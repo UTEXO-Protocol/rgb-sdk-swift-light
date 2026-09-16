@@ -32,6 +32,12 @@ For the enabled `sendBtc` profile, the local core verifies before signing:
 The backend result txid must match the locally validated unsigned txid before a
 terminal result is persisted or returned.
 
+For `sendBtc`, “vanilla-only inputs” has an exact local meaning: every input
+must carry one BIP86 origin in the vanilla external/change account, and its
+Taproot internal key and script must match a fresh derivation from the local
+seed. The shared core enforces this as a mandatory floor even if a higher layer
+tries to widen the allowed scopes.
+
 ## What is not proved
 
 `rust-bitcoin` is not a chain validator or complete script interpreter. Local
@@ -43,6 +49,11 @@ transition/consignment, contracts, schemas, consumed assignments, change
 assignments, commitment proof, and witness/history evidence, a malicious
 backend could commit a different RGB state transition while presenting an
 otherwise acceptable Bitcoin transaction. Consequently:
+
+- A vanilla derivation path does not itself prove that an outpoint carries no
+  RGB assignment. If “vanilla-only” means allocation-free rather than the
+  segregated vanilla account, that guarantee requires authoritative RGB state
+  evidence and is not available in this lightweight profile.
 
 - `localTransactionValidation` never means chain-state validation.
 - `localRGBValidation` remains `false`.
