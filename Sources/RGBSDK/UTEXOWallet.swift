@@ -1,0 +1,543 @@
+import Foundation
+
+/// High-level wallet facade matching the semantic surface of `rgb-sdk-rn`.
+///
+/// Stateful wallet/RGB work is delegated to the backend. Bitcoin key
+/// derivation, transaction-policy validation, and signing remain local. No
+/// public wallet method accepts or returns a PSBT.
+public actor UTEXOWallet {
+    private enum Lifecycle: String {
+        case new
+        case initialized
+        case unlocked
+        case shutdown
+        case disposed
+    }
+
+    public nonisolated let configuration: WalletConfiguration
+
+    private let backend: any WalletBackend
+    private let keyProvider: any WalletKeyProvider
+    private let operationCoordinator: OperationCoordinator
+    private let signingEngineFactory: any LocalSigningEngineFactory
+
+    private var lifecycle: Lifecycle = .new
+    private var session: BackendSession?
+    private var signingEngine: (any LocalSigningEngine)?
+    private var reportedCapabilities: WalletCapabilities = .locked
+
+    // Swift actors are reentrant at `await`. This FIFO gate keeps lifecycle and
+    // payment workflows atomic across backend suspension points.
+    private var gateHeld = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Infrastructure initializer. A future UTEXO backend transport package
+    /// will expose an application-level factory without exposing this SPI.
+    @_spi(Backend)
+    public init(
+        configuration: WalletConfiguration,
+        backend: any WalletBackend,
+        keyProvider: any WalletKeyProvider,
+        operationJournal: any OperationJournal
+    ) {
+        self.configuration = configuration
+        self.backend = backend
+        self.keyProvider = keyProvider
+        signingEngineFactory = UniFFILocalSigningEngineFactory()
+        operationCoordinator = OperationCoordinator(
+            configuration: configuration,
+            backend: backend,
+            journal: operationJournal,
+            now: { UInt64(Date().timeIntervalSince1970) }
+        )
+    }
+
+    init(
+        configuration: WalletConfiguration,
+        backend: any WalletBackend,
+        keyProvider: any WalletKeyProvider,
+        operationJournal: any OperationJournal,
+        signingEngineFactory: any LocalSigningEngineFactory,
+        now: @escaping @Sendable () -> UInt64
+    ) {
+        self.configuration = configuration
+        self.backend = backend
+        self.keyProvider = keyProvider
+        self.signingEngineFactory = signingEngineFactory
+        operationCoordinator = OperationCoordinator(
+            configuration: configuration,
+            backend: backend,
+            journal: operationJournal,
+            now: now
+        )
+    }
+
+    public var capabilities: WalletCapabilities { reportedCapabilities }
+    public nonisolated func getNetwork() -> Network { configuration.network }
+    public func isDisposed() -> Bool { lifecycle == .disposed }
+
+    /// Idempotently opens and negotiates a backend wallet session.
+    public func initialize() async throws {
+        try await exclusive { try await initializeLocked() }
+    }
+
+    /// Loads seed material locally and registers watch-only identity remotely.
+    public func unlock() async throws {
+        let parameters = WalletUnlockParameters.none()
+        defer { parameters.close() }
+        try await unlock(parameters)
+    }
+
+    public func unlock(_ parameters: WalletUnlockParameters) async throws {
+        try await exclusive { try await unlockLocked(parameters) }
+    }
+
+    /// Idiomatic labeled spelling retained by the cross-platform contract.
+    public func unlock(parameters: WalletUnlockParameters) async throws {
+        try await unlock(parameters)
+    }
+
+    /// Restart-compatible RN lifecycle operation. Supplying parameters also unlocks.
+    public func reinit(_ parameters: WalletUnlockParameters? = nil) async throws {
+        try await exclusive {
+            try await initializeLocked()
+            if let parameters { try await unlockLocked(parameters) }
+        }
+    }
+
+    /// Idiomatic spelling of the RN-compatible `reinit` operation.
+    public func reinitialize(parameters: WalletUnlockParameters? = nil) async throws {
+        try await reinit(parameters)
+    }
+
+    /// Stops the session but preserves durable wallet data and permits `reinit`.
+    public func shutdown() async throws {
+        try await exclusive { try await shutdownLocked(dispose: false) }
+    }
+
+    /// Idempotently closes this instance. It does not delete wallet/backend data.
+    public func destroy() async throws {
+        try await exclusive { try await shutdownLocked(dispose: true) }
+    }
+
+    /// RN compatibility alias.
+    public func dispose() async throws { try await destroy() }
+
+    public func getBtcBalance() async throws -> BTCBalance {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.getBtcBalance(context: context) }
+        }
+    }
+
+    public func getAddress() async throws -> BitcoinAddress {
+        try await reserveAddress(rotate: false)
+    }
+
+    public func rotateVanillaAddress() async throws -> BitcoinAddress {
+        try await reserveAddress(rotate: true)
+    }
+
+    public func listUnspents() async throws -> [Unspent] {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.listUnspents(context: context) }
+        }
+    }
+
+    public func estimateFeeRate(blocks: BlockCount) async throws -> FeeEstimate {
+        try await withUnlocked { context, _ in
+            try await backendCall {
+                try await backend.estimateFeeRate(context: context, targetBlocks: blocks)
+            }
+        }
+    }
+
+    public func sendBtc(_ request: SendBtcRequest) async throws -> TransactionID {
+        try await withUnlocked { context, signer in
+            try requireLocalSigning(signer, operation: .sendBtc)
+            return try await operationCoordinator.sendBtc(
+                backendContext: context,
+                signer: signer,
+                request: request
+            )
+        }
+    }
+
+    /// RN-shaped convenience overload.
+    public func sendBtc(
+        address: BitcoinAddress,
+        amount: Satoshis,
+        feeRate: FeeRate = .default,
+        skipSync: Bool = false,
+        idempotencyKey: IdempotencyKey = .random()
+    ) async throws -> TransactionID {
+        try await sendBtc(
+            .init(
+                address: address,
+                amount: amount,
+                feeRate: feeRate,
+                skipSync: skipSync,
+                idempotencyKey: idempotencyKey
+            )
+        )
+    }
+
+    /// Surface frozen now; signing remains disabled until an exact owned-output
+    /// plan is represented and enforced by the shared policy core.
+    public func createUtxos() async throws -> CreateUtxosResult {
+        try await createUtxos(CreateUtxosRequest())
+    }
+
+    public func createUtxos(_ request: CreateUtxosRequest) async throws -> CreateUtxosResult {
+        try await withUnlocked { _, signer in
+            try requireLocalSigning(signer, operation: .createUtxos)
+            throw SDKError.unsupported("createUtxos backend signing contract")
+        }
+    }
+
+    public func listAssets() async throws -> ListAssets {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.listAssets(context: context) }
+        }
+    }
+
+    public func getAssetBalance(assetID: AssetID) async throws -> AssetBalance {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.getAssetBalance(context: context, assetID: assetID) }
+        }
+    }
+
+    public func issueAssetNia(_ request: IssueAssetNiaRequest) async throws -> AssetNIA {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.issueAssetNia(context: context, request: request) }
+        }
+    }
+
+    /// Swift acronym-casing compatibility alias.
+    public func issueAssetNIA(_ request: IssueAssetNiaRequest) async throws -> AssetNIA {
+        try await issueAssetNia(request)
+    }
+
+    public func issueAssetIfa(_ request: IssueAssetIfaRequest) async throws -> AssetIFA {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.issueAssetIfa(context: context, request: request) }
+        }
+    }
+
+    /// Swift acronym-casing compatibility alias.
+    public func issueAssetIFA(_ request: IssueAssetIfaRequest) async throws -> AssetIFA {
+        try await issueAssetIfa(request)
+    }
+
+    public func blindReceive(_ request: InvoiceRequest) async throws -> InvoiceReceiveData {
+        try await withUnlocked { _, signer in
+            try requireLocalRGBInvoiceParsing(signer)
+            throw SDKError.unsupported("local RGB invoice parsing")
+        }
+    }
+
+    public func witnessReceive(_ request: InvoiceRequest) async throws -> InvoiceReceiveData {
+        try await withUnlocked { _, signer in
+            try requireLocalRGBInvoiceParsing(signer)
+            throw SDKError.unsupported("local RGB invoice parsing")
+        }
+    }
+
+    public func decodeRGBInvoice(_ invoice: RGBInvoice) async throws -> InvoiceData {
+        try await withUnlocked { _, signer in
+            try requireLocalRGBInvoiceParsing(signer)
+            throw SDKError.unsupported("local RGB invoice parsing")
+        }
+    }
+
+    public func decodeRgbInvoice(_ invoice: RGBInvoice) async throws -> InvoiceData {
+        try await decodeRGBInvoice(invoice)
+    }
+
+    public func onchainReceive(_ request: OnchainReceiveRequest) async throws -> OnchainReceiveResponse {
+        try await withUnlocked { _, signer in
+            try requireLocalRGBInvoiceParsing(signer)
+            throw SDKError.unsupported("local RGB invoice parsing")
+        }
+    }
+
+    /// Surface frozen now; disabled until backend evidence can be bound to the
+    /// caller's RGB intent and the server-trust boundary is explicitly versioned.
+    public func onchainSend(_ request: OnchainSendRequest) async throws -> OnchainSendResponse {
+        try await withUnlocked { _, signer in
+            try requireLocalSigning(signer, operation: .onchainSend)
+            throw SDKError.unsupported("onchainSend backend signing contract")
+        }
+    }
+
+    /// RN-parity entry point, intentionally disabled until the backend and
+    /// native core expose an exact inflation transition contract.
+    public func inflate(_ request: InflateRequest) async throws -> TransactionID {
+        try await withUnlocked { _, signer in
+            try requireLocalSigning(signer, operation: .inflate)
+            throw SDKError.unsupported(
+                "backend-bound inflation preparation and RGB transition validation"
+            )
+        }
+    }
+
+    public func listTransactions() async throws -> [Transaction] {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.listTransactions(context: context) }
+        }
+    }
+
+    public func listTransactionsByTxid(
+        _ txid: TransactionID,
+        skipSync: Bool = false
+    ) async throws -> [Transaction] {
+        try await withUnlocked { context, _ in
+            try await backendCall {
+                try await backend.listTransactions(context: context, txid: txid, skipSync: skipSync)
+            }
+        }
+    }
+
+    /// Idiomatic labeled spelling of `listTransactionsByTxid`.
+    public func listTransactions(
+        txid: TransactionID,
+        skipSync: Bool = false
+    ) async throws -> [Transaction] {
+        try await listTransactionsByTxid(txid, skipSync: skipSync)
+    }
+
+    public func listTransfers(assetID: AssetID? = nil) async throws -> [Transfer] {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.listTransfers(context: context, assetID: assetID) }
+        }
+    }
+
+    public func listTransfersByTxid(_ txid: TransactionID) async throws -> [Transfer] {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.listTransfers(context: context, txid: txid) }
+        }
+    }
+
+    public func listOnchainTransfers(assetID: AssetID? = nil) async throws -> [Transfer] {
+        try await listTransfers(assetID: assetID)
+    }
+
+    public func failTransfers(_ request: FailTransfersRequest) async throws -> FailTransfersResult {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.failTransfers(context: context, request: request) }
+        }
+    }
+
+    public func refreshWallet() async throws -> SyncResult {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.refreshWallet(context: context) }
+        }
+    }
+
+    public func syncWallet() async throws -> SyncResult {
+        try await withUnlocked { context, _ in
+            try await backendCall { try await backend.syncWallet(context: context) }
+        }
+    }
+
+    private func reserveAddress(rotate: Bool) async throws -> BitcoinAddress {
+        try await withUnlocked { context, signer in
+            let reservation = try await backendCall {
+                try await backend.reserveAddress(
+                    .init(context: context, account: .vanilla, rotate: rotate)
+                )
+            }
+            guard reservation.account == .vanilla, reservation.keychain == .external else {
+                throw SDKError.backendProtocolMismatch(
+                    "backend reserved an address outside the vanilla external branch"
+                )
+            }
+            try signer.verifyReservedAddress(reservation)
+            return reservation.address
+        }
+    }
+
+    private func initializeLocked() async throws {
+        switch lifecycle {
+        case .disposed:
+            throw SDKError.walletDisposed
+        case .initialized, .unlocked:
+            return
+        case .new, .shutdown:
+            break
+        }
+        let opened = try await backendCall {
+            try await backend.initialize(
+                .init(
+                    walletID: configuration.walletID,
+                    network: configuration.network,
+                    minimumAPIVersion: configuration.minimumBackendAPIVersion,
+                    maximumAPIVersion: configuration.maximumBackendAPIVersion
+                )
+            )
+        }
+        guard opened.network == configuration.network else {
+            try? await backend.shutdown(session: opened)
+            throw SDKError.wrongNetwork(expected: configuration.network, actual: opened.network)
+        }
+        guard (configuration.minimumBackendAPIVersion...configuration.maximumBackendAPIVersion)
+            .contains(opened.apiVersion) else {
+            try? await backend.shutdown(session: opened)
+            throw SDKError.backendProtocolMismatch(
+                "negotiated API version is outside the configured range",
+                correlationID: opened.correlationID
+            )
+        }
+        session = opened
+        lifecycle = .initialized
+    }
+
+    private func unlockLocked(_ parameters: WalletUnlockParameters) async throws {
+        switch lifecycle {
+        case .unlocked:
+            return
+        case .disposed:
+            throw SDKError.walletDisposed
+        case .new, .shutdown:
+            throw SDKError.invalidState(operation: "unlock", state: lifecycle.rawValue)
+        case .initialized:
+            break
+        }
+        guard let session else { throw SDKError.invariant("initialized wallet has no session") }
+
+        let secret: SecretSeed
+        do {
+            secret = try await keyProvider.loadSeed(parameters: parameters)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as SDKError {
+            throw error
+        } catch {
+            throw SDKError.keyAccessFailed
+        }
+        defer { secret.close() }
+        let candidate = try signingEngineFactory.open(network: configuration.network, seed: secret)
+        try validateCapabilities(candidate.capabilities)
+        let identity = try candidate.identity()
+        try validateIdentity(identity)
+        try await backendCall {
+            try await backend.registerWallet(
+                .init(
+                    context: .init(
+                        session: session,
+                        walletID: configuration.walletID,
+                        network: configuration.network
+                    ),
+                    identity: identity
+                )
+            )
+        }
+        signingEngine = candidate
+        reportedCapabilities = candidate.capabilities
+        lifecycle = .unlocked
+    }
+
+    private func shutdownLocked(dispose: Bool) async throws {
+        if lifecycle == .disposed { return }
+        signingEngine = nil
+        reportedCapabilities = .locked
+        let activeSession = session
+        session = nil
+        lifecycle = dispose ? .disposed : .shutdown
+        if let activeSession {
+            try await backendCall { try await backend.shutdown(session: activeSession) }
+        }
+    }
+
+    private func validateCapabilities(_ capabilities: WalletCapabilities) throws {
+        guard capabilities.derivationProfile == WalletCapabilities.derivationProfileV1 else {
+            throw SDKError.backendProtocolMismatch("local derivation profile is incompatible")
+        }
+        guard capabilities.signingProfile == WalletCapabilities.signingProfileV1 else {
+            throw SDKError.backendProtocolMismatch("local signing profile is incompatible")
+        }
+    }
+
+    private func validateIdentity(_ identity: WalletIdentity) throws {
+        guard identity.network == configuration.network else {
+            throw SDKError.wrongNetwork(expected: configuration.network, actual: identity.network)
+        }
+        guard identity.chainNetwork == configuration.network.chainNetwork else {
+            throw SDKError.backendProtocolMismatch("local identity has the wrong chain network")
+        }
+        guard identity.derivationProfile == WalletCapabilities.derivationProfileV1 else {
+            throw SDKError.backendProtocolMismatch("local identity has an unsupported derivation profile")
+        }
+        guard isASCIIHex(identity.masterFingerprint, exactByteCount: 8) else {
+            throw SDKError.backendProtocolMismatch("local identity has an invalid master fingerprint")
+        }
+        _ = try requireBoundedText(identity.xpub, field: "xpub", maximumUTF8Bytes: 256)
+        _ = try requireBoundedText(identity.accountXpubVanilla, field: "accountXpubVanilla", maximumUTF8Bytes: 256)
+        _ = try requireBoundedText(identity.accountXpubColored, field: "accountXpubColored", maximumUTF8Bytes: 256)
+    }
+
+    private func requireLocalSigning(
+        _ signer: any LocalSigningEngine,
+        operation: OperationKind
+    ) throws {
+        guard signer.capabilities.localTransactionValidation,
+              signer.capabilities.localTransactionSigning,
+              signer.capabilities.localSigningOperations.contains(operation) else {
+            throw SDKError.unsupported("complete local \(operation.rawValue) intent validation and signing")
+        }
+    }
+
+    private func requireLocalRGBInvoiceParsing(_ signer: any LocalSigningEngine) throws {
+        guard signer.capabilities.localRGBInvoiceParsing else {
+            throw SDKError.unsupported("local RGB invoice parsing")
+        }
+    }
+
+    private func unlockedContext() throws -> (BackendContext, any LocalSigningEngine) {
+        switch lifecycle {
+        case .disposed: throw SDKError.walletDisposed
+        case .unlocked: break
+        case .new, .initialized, .shutdown: throw SDKError.walletLocked
+        }
+        guard let session else { throw SDKError.invariant("unlocked wallet has no backend session") }
+        guard let signingEngine else { throw SDKError.invariant("unlocked wallet has no local signer") }
+        return (
+            .init(session: session, walletID: configuration.walletID, network: configuration.network),
+            signingEngine
+        )
+    }
+
+    private func withUnlocked<T: Sendable>(
+        _ body: (BackendContext, any LocalSigningEngine) async throws -> T
+    ) async throws -> T {
+        try await exclusive {
+            let (context, signer) = try unlockedContext()
+            return try await body(context, signer)
+        }
+    }
+
+    private func acquireGate() async {
+        if !gateHeld {
+            gateHeld = true
+            return
+        }
+        await withCheckedContinuation { gateWaiters.append($0) }
+    }
+
+    private func releaseGate() {
+        if gateWaiters.isEmpty {
+            gateHeld = false
+        } else {
+            gateWaiters.removeFirst().resume()
+        }
+    }
+
+    private func exclusive<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+        await acquireGate()
+        defer { releaseGate() }
+        // A cancelled task may have spent time queued behind a signing or
+        // lifecycle workflow. It must never execute the body after receiving
+        // the FIFO token.
+        try Task.checkCancellation()
+        return try await body()
+    }
+}

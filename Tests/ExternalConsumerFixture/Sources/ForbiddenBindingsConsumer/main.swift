@@ -1,0 +1,3 @@
+import UtexoLocalSignerBindings
+
+_ = defaultSigningPolicy()
