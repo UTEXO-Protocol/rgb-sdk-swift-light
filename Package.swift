@@ -11,31 +11,9 @@ let package = Package(
     products: [
         .library(name: "RGBSDK", targets: ["RGBSDK"]),
     ],
-    targets: [
-        .binaryTarget(
-            name: "UtexoLocalSignerFFI",
-            path: "Artifacts/UtexoLocalSigner.xcframework"
-        ),
-        .target(
-            name: "UtexoLocalSignerBindings",
-            dependencies: ["UtexoLocalSignerFFI"],
-            path: "Generated",
-            exclude: [
-                "UtexoLocalSignerFFI.h",
-                "UtexoLocalSignerFFI.modulemap",
-            ],
-            sources: ["UtexoLocalSignerBindings.swift"]
-        ),
-        .target(
-            name: "RGBSDK",
-            dependencies: ["UtexoLocalSignerBindings"],
-            path: "Sources/RGBSDK"
-        ),
-        .testTarget(
-            name: "RGBSDKTests",
-            dependencies: ["RGBSDK"],
-            path: "Tests/RGBSDKTests"
-        ),
-    ],
+    // Only this facade is placed on application import/link paths. The private
+    // native artifacts/source remain in the repository for reproducible audits;
+    // Package.source.swift is staged by Scripts/verify-source.sh for development.
+    targets: [.binaryTarget(name: "RGBSDK", path: "Artifacts/RGBSDK.xcframework")],
     swiftLanguageModes: [.v6]
 )

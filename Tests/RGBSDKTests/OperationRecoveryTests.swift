@@ -2,6 +2,90 @@ import Foundation
 import Testing
 @testable @_spi(Backend) import RGBSDK
 
+@Test func compactTerminalReplayReturnsOriginalResultWithoutBackendOrSigning() async throws {
+    let fixture = try RecoveryFixture(phase: .signed)
+    let full = try OperationCheckpoint(
+        walletID: fixture.configuration.walletID, idempotencyKey: fixture.request.idempotencyKey,
+        requestHash: fixture.initialCheckpoint.requestHash, operationKind: .sendBtc,
+        phase: .terminal, operationID: fixture.operationID, preparedTransaction: fixture.prepared,
+        signedPsbtBase64: fixture.signedPSBT, validation: fixture.validation,
+        terminalOutcome: .succeeded(.sendBtc(operationID: fixture.operationID, txid: fixture.txid))
+    )
+    try await fixture.journal.save(full.compactTerminal)
+    let signer = SubmissionValidationRejectingSigner()
+    for _ in 0..<2 {
+        #expect(try await fixture.coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: signer, request: fixture.request
+        ) == fixture.txid)
+    }
+    let changed = try SendBtcRequest(
+        address: fixture.request.address, amount: Satoshis(10_001),
+        feeRate: fixture.request.feeRate, idempotencyKey: fixture.request.idempotencyKey
+    )
+    do {
+        _ = try await fixture.coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: signer, request: changed
+        )
+        Issue.record("expected original key/intent binding to survive compaction")
+    } catch let error as SDKError { #expect(error.code == .operationConflict) }
+    #expect(signer.policies.isEmpty)
+    #expect(await fixture.backend.prepareCount == 0)
+    #expect(await fixture.backend.operationLookupCount == 0)
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+}
+
+@Test func retainedSignedPolicyRejectionPreservesExactCheckpointWithoutSubmission() async throws {
+    let fixture = try RecoveryFixture(phase: .signed)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    let signer = SubmissionValidationRejectingSigner()
+    let tightenedPolicy = try LocalSigningPolicy(maximumAbsoluteFee: Satoshis(999))
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(
+            walletID: fixture.configuration.walletID, network: fixture.configuration.network,
+            signingPolicy: tightenedPolicy
+        ),
+        backend: fixture.backend, journal: fixture.journal, now: { 1 }
+    )
+    do {
+        _ = try await coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: signer, request: fixture.request
+        )
+        Issue.record("expected tightened-policy rejection")
+    } catch let error as SDKError { #expect(error.code == .policyRejected) }
+    #expect(signer.policies == [tightenedPolicy])
+    #expect(await fixture.backend.prepareCount == 0)
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+    #expect(await fixture.journal.load(
+        walletID: fixture.configuration.walletID, idempotencyKey: fixture.request.idempotencyKey
+    ) == fixture.initialCheckpoint)
+}
+
+@Test func stricterPolicyDoesNotBlockSubmittingOrTerminalReadOnlyRecovery() async throws {
+    let fixture = try RecoveryFixture(phase: .submitting)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    await fixture.backend.setStatus(.succeeded(
+        operationID: fixture.operationID,
+        result: .sendBtc(operationID: fixture.operationID, txid: fixture.txid)
+    ))
+    let signer = SubmissionValidationRejectingSigner()
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(
+            walletID: fixture.configuration.walletID, network: fixture.configuration.network,
+            signingPolicy: LocalSigningPolicy(maximumAbsoluteFee: Satoshis(0))
+        ),
+        backend: fixture.backend, journal: fixture.journal, now: { 1 }
+    )
+    for _ in 0..<2 {
+        #expect(try await coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: signer, request: fixture.request
+        ) == fixture.txid)
+    }
+    #expect(signer.policies.isEmpty)
+    #expect(await fixture.backend.prepareCount == 0)
+    #expect(await fixture.backend.submittedPSBTs.isEmpty)
+    #expect(await fixture.backend.operationLookupCount == 1)
+}
+
 @Test func signedCheckpointResubmitsIdenticalBytesWithoutPreparingOrResigning() async throws {
     let fixture = try RecoveryFixture(phase: .signed)
     try await fixture.journal.save(fixture.initialCheckpoint)
@@ -94,6 +178,46 @@ import Testing
         idempotencyKey: fixture.request.idempotencyKey
     )
     #expect(checkpoint?.phase == .submitting)
+}
+
+@Test func unrelatedAmbiguousSubmissionErrorCannotTriggerStatusLookup() async throws {
+    let fixture = try RecoveryFixture(phase: .signed)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    let unrelatedID = try OperationID("different-operation")
+    await fixture.backend.setSubmissionError(.operationAmbiguous(unrelatedID))
+    do {
+        _ = try await fixture.coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: NeverSigner(), request: fixture.request
+        )
+        Issue.record("expected the unbound ambiguous error")
+    } catch let error as SDKError {
+        #expect(error.code == .operationAmbiguous)
+        #expect(error.operationID == unrelatedID)
+    }
+    #expect(await fixture.backend.operationLookupCount == 0)
+    #expect(await fixture.backend.prepareCount == 0)
+    #expect(await fixture.backend.submittedPSBTs == [fixture.signedPSBT])
+    let stored = await fixture.journal.load(walletID: fixture.configuration.walletID, idempotencyKey: fixture.request.idempotencyKey)
+    #expect(stored?.phase == .submitting)
+    #expect(stored?.signedPsbtBase64 == fixture.signedPSBT)
+}
+
+@Test func genericBackendAmbiguousSubmissionKeepsItsExistingNoImmediateLookupSemantics() async throws {
+    let fixture = try RecoveryFixture(phase: .signed)
+    try await fixture.journal.save(fixture.initialCheckpoint)
+    await fixture.backend.setSubmissionError(.operationAmbiguous(fixture.operationID))
+    do {
+        _ = try await fixture.coordinator.sendBtc(
+            backendContext: fixture.backendContext, signer: NeverSigner(), request: fixture.request
+        )
+        Issue.record("expected ambiguous submission")
+    } catch let error as SDKError {
+        #expect(error.code == .operationAmbiguous)
+        #expect(error.operationID == fixture.operationID)
+    }
+    #expect(await fixture.backend.operationLookupCount == 0)
+    #expect(await fixture.backend.submittedPSBTs == [fixture.signedPSBT])
+    #expect(await fixture.journal.load(walletID: fixture.configuration.walletID, idempotencyKey: fixture.request.idempotencyKey)?.phase == .submitting)
 }
 
 @Test func definitiveBackendRejectionIsPersistedAndReplayed() async throws {
@@ -426,6 +550,34 @@ import Testing
     }
 }
 
+@Test func feeEstimateChecksNativeTargetDomainBeforeBackendWork() async throws {
+    let fixture = try RecoveryFixture(phase: .created)
+    let wallet = UTEXOWallet(
+        configuration: fixture.configuration, backend: fixture.backend,
+        keyProvider: StaticKeyProvider(), operationJournal: fixture.journal,
+        signingEngineFactory: IdentitySignerFactory(), now: { 1 }
+    )
+    try await wallet.initialize()
+    try await wallet.unlock()
+    for blocks: UInt32 in [0, 1_009, .max] {
+        do {
+            _ = try await wallet.estimateFeeRate(blocks: .init(rawValue: blocks))
+            Issue.record("expected an invalid confirmation target")
+        } catch let error as SDKError { #expect(error.code == .invalidArgument) }
+    }
+    #expect(await fixture.backend.feeEstimateTargets.isEmpty)
+    for blocks: UInt32 in [1, 1_008] {
+        #expect(try await wallet.estimateFeeRate(blocks: .init(rawValue: blocks)).targetBlocks.rawValue == blocks)
+    }
+    #expect(await fixture.backend.feeEstimateTargets == [1, 1_008])
+    await fixture.backend.setFeeEstimateTargetOverride(.init(rawValue: 2))
+    do {
+        _ = try await wallet.estimateFeeRate(blocks: .init(rawValue: 1))
+        Issue.record("expected changed confirmation-target rejection")
+    } catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+    try await wallet.destroy()
+}
+
 @Test func walletLifecycleIsIdempotentAndDisposeIsTerminal() async throws {
     let fixture = try RecoveryFixture(phase: .created)
     let wallet = UTEXOWallet(
@@ -595,12 +747,40 @@ private struct NeverSigner: LocalSigningEngine {
     func verifyReservedAddress(_ reservation: ReservedAddress) throws {
         throw SDKError.invariant("unexpected address verification")
     }
+    func validateBeforeSubmission(
+        prepared: PreparedTransaction, request: SendBtcRequest,
+        policy: LocalSigningPolicy, retainedValidation: LocalValidationReport
+    ) throws {
+        // These coordinator fixtures deliberately contain synthetic PSBTs.
+        // Real policy enforcement is exercised through the packaged signer.
+    }
     func validateAndSign(
         prepared: PreparedTransaction,
         request: SendBtcRequest,
         policy: LocalSigningPolicy
     ) throws -> LocalSigningResult {
         throw SDKError.invariant("unexpected signing")
+    }
+}
+
+private final class SubmissionValidationRejectingSigner: LocalSigningEngine, @unchecked Sendable {
+    let capabilities = WalletCapabilities.locked
+    private let lock = NSLock()
+    private var recordedPolicies: [LocalSigningPolicy] = []
+    var policies: [LocalSigningPolicy] { lock.withLock { recordedPolicies } }
+    func identity() throws -> WalletIdentity { throw SDKError.invariant("unexpected identity") }
+    func verifyReservedAddress(_ reservation: ReservedAddress) throws {
+        throw SDKError.invariant("unexpected address verification")
+    }
+    func validateAndSign(
+        prepared: PreparedTransaction, request: SendBtcRequest, policy: LocalSigningPolicy
+    ) throws -> LocalSigningResult { throw SDKError.invariant("must never re-sign") }
+    func validateBeforeSubmission(
+        prepared: PreparedTransaction, request: SendBtcRequest,
+        policy: LocalSigningPolicy, retainedValidation: LocalValidationReport
+    ) throws {
+        lock.withLock { recordedPolicies.append(policy) }
+        throw SDKError.policyRejected("retained preparation exceeds current policy")
     }
 }
 
@@ -630,6 +810,10 @@ private final class RecordingSigner: LocalSigningEngine, @unchecked Sendable {
     func verifyReservedAddress(_ reservation: ReservedAddress) throws {
         throw SDKError.invariant("unexpected address verification")
     }
+    func validateBeforeSubmission(
+        prepared: PreparedTransaction, request: SendBtcRequest,
+        policy: LocalSigningPolicy, retainedValidation: LocalValidationReport
+    ) throws {}
     func validateAndSign(
         prepared: PreparedTransaction,
         request: SendBtcRequest,
@@ -641,6 +825,16 @@ private final class RecordingSigner: LocalSigningEngine, @unchecked Sendable {
 }
 
 private actor RecoveryBackend: WalletBackend {
+    private(set) var feeEstimateTargets: [UInt32] = []
+    private var feeEstimateTargetOverride: BlockCount?
+
+    func setFeeEstimateTargetOverride(_ target: BlockCount) { feeEstimateTargetOverride = target }
+
+    func estimateFeeRate(context: BackendContext, targetBlocks: BlockCount) async throws -> FeeEstimate {
+        feeEstimateTargets.append(targetBlocks.rawValue)
+        return FeeEstimate(feeRate: .default, targetBlocks: feeEstimateTargetOverride ?? targetBlocks)
+    }
+
     private var result: BackendOperationResult
     let session: BackendSession
     private(set) var prepareCount = 0
@@ -784,6 +978,11 @@ private struct IdentitySigner: LocalSigningEngine {
     }
 
     func verifyReservedAddress(_ reservation: ReservedAddress) throws {}
+
+    func validateBeforeSubmission(
+        prepared: PreparedTransaction, request: SendBtcRequest,
+        policy: LocalSigningPolicy, retainedValidation: LocalValidationReport
+    ) throws { throw SDKError.invariant("unexpected submission validation") }
 
     func validateAndSign(
         prepared: PreparedTransaction,

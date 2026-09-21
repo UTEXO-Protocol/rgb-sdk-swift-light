@@ -12,7 +12,7 @@ public struct AccountXpubs: Hashable, Sendable {
 }
 
 /// RN-shaped key result whose secret fields are redacting, closeable objects.
-public final class GeneratedKeys: @unchecked Sendable, CustomStringConvertible {
+public final class GeneratedKeys: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     public let mnemonic: SecretMnemonic?
     public let xpub: String
     public let accountXpubVanilla: String
@@ -52,6 +52,10 @@ public final class GeneratedKeys: @unchecked Sendable, CustomStringConvertible {
             + "accountXpubVanilla=\(accountXpubVanilla), "
             + "accountXpubColored=\(accountXpubColored), "
             + "masterFingerprint=\(masterFingerprint), xpriv=[REDACTED])"
+    }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: ["mnemonic": "[REDACTED]", "xpriv": "[REDACTED]", "xpub": xpub])
     }
 }
 

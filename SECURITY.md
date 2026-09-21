@@ -3,7 +3,10 @@
 ## Status
 
 This code is pre-release. It has not completed an independent security audit,
-backend interoperability testing, or Bitcoin Core regtest validation. Reported
+end-to-end backend interoperability, or comprehensive Bitcoin Core differential
+validation. A shipped-XCFramework regtest diagnostic passed Core mempool
+acceptance and signature-tamper rejection for a policy-compliant BTC send;
+this does not validate the unchanged gateway profile or every signing case. Reported
 capabilities describe implemented local checks; they are not a claim that the
 future end-to-end service is production-ready.
 
@@ -13,7 +16,8 @@ Private seed/mnemonic/xpriv material is trusted and must remain local. The
 backend, transport, prepared PSBT, network data, persisted operation records,
 and all caller strings are treated as untrusted inputs.
 
-For the enabled `sendBtc` profile, the local core verifies before signing:
+For the legacy local `sendBtc` profile (new gateway spending remains gated),
+the local core verifies before signing:
 
 - canonical bounded PSBTv0 and unsigned transaction version 2;
 - unique, wallet-owned BIP86 P2TR inputs with exact fingerprints and paths;
@@ -27,10 +31,35 @@ For the enabled `sendBtc` profile, the local core verifies before signing:
 - no OP_RETURN outputs or colored-account inputs;
 - only permitted Taproot sighashes;
 - immediate verification of every generated BIP340 signature; and
-- structural equality before/after signing except newly added key signatures.
+- BIP174/BIP371 final key-path witnesses with consumed input signing metadata
+  cleared; transaction inputs/outputs and fees remain unchanged.
 
 The backend result txid must match the locally validated unsigned txid before a
 terminal result is persisted or returned.
+
+The separately selected internal `utexo.psbt.rgb-lib.v1` profile does not
+reinterpret this legacy policy or its persisted intent digests. It fixes input
+and owned output derivation to the native builder's branch 0, retains version 2
+and required RBF, and bounds height-based locktime by an independently trusted
+caller context. A PSBT cannot supply its own trusted height. It separately
+enforces the requested fee target against conservative signed transaction weight
+(65-byte Taproot signatures, integer fee rounding), and the app's hard absolute
+and rate caps. No arbitrary dust or percentage overpayment is authorized.
+
+Create-UTXO authorization binds the caller's defaults/count/size and every exact
+colored output path in the retained plan; vanilla change is independently
+re-derived. Fungible RGB authorization checks the invoice's literal encoded
+state, effective asset, witness BTC recipient/amount, expiry, and caller options;
+it limits Bitcoin spending/change/commitment shape but **does not validate the
+RGB transition or prove allocations**. Server RGB state remains trusted.
+
+The SDK persists create/RGB operations through the same conservative state
+machine as BTC. It never terminalizes a different txid, result kind, operation
+ID or create-output count. An expired invoice or newly disabled signing
+capability is checked only before new risky transitions, never used as a reason
+to discard SUBMITTING evidence or prevent completed-result replay. The shipped
+gateway still refuses new create/RGB operations and cannot reconcile their
+incomplete current status payloads; no profile test opens those transport gates.
 
 For `sendBtc`, “vanilla-only inputs” has an exact local meaning: every input
 must carry one BIP86 origin in the vanilla external/change account, and its
@@ -74,6 +103,14 @@ Swift, Foundation, UniFFI, and Rust is best effort, not an absolute guarantee.
 Keychain/Secure Enclave access controls protect seed retrieval but do not make
 secp256k1/BIP32 operations execute inside Secure Enclave.
 
+The seed access policy is installed only at item creation. Reopening with a
+different policy does not migrate its Keychain ACL. After unlock, native signing
+material remains in memory for the session; subsequent signatures do not
+automatically request biometrics. The app must enforce its background/idle/device
+lock policy and await shutdown/disposal. Shutdown serializes behind in-flight
+wallet work and is not transaction rollback. Physical-device qualification of
+that app-owned lifecycle is required.
+
 Root extended-private-key import/export exists only for RN compatibility, is
 deprecated, and should not be used in new integrations.
 
@@ -81,19 +118,97 @@ deprecated, and should not be used in new integrations.
 
 The future backend must negotiate an exact supported profile and echo the
 locally computed request hash, idempotency key, network, operation ID, and
-expiry. Unknown versions/fields fail closed.
+expiry. Unsupported protocol versions and semantically invalid fields fail closed.
+The current private JSON adapter ignores additive object keys for compatibility;
+required recovery fields, enums, types, explicit nulls, and intent allowances are
+validated. Additive keys never authorize signing or extra transaction outputs.
+
+`syncWallet`/`refreshWallet` call the gateway's combined BTC synchronization and
+RGB refresh route; success is returned only after a 200 JSON `status: "ok"`
+acknowledgment. Their timestamp records the client's observation, not a claim
+about server time, tip height, independent chain validation, or absolute data
+freshness. Both methods may perform the combined operation in this adapter.
 
 Production journals must atomically encrypt and authenticate the opaque bytes
 from `OperationCheckpointCodec`; its trailing SHA-256 detects accidental
 corruption but is not authentication. The exact prepared transaction is saved
 before signing, and the exact signed PSBT plus validation report is saved before
-submission. PREPARED revalidates and signs that same preparation, SIGNED submits
-the identical signed bytes, and SUBMITTING reconciles without preparing or
+submission. PREPARED revalidates and signs that same preparation, SIGNED runs
+full validation under the current policy before submitting the identical signed
+bytes, and SUBMITTING reconciles without preparing or
 signing again. Definitive success, rejection, and expiry outcomes are terminal
 and replay locally on subsequent same-key calls.
 
+PR #174 at `7f318a80372ae3bdc7e2f54cd6cd4b7b5d734d9d` provides a read-only
+operation-status endpoint. Its BTC completed result is accepted only against
+the original caller request and authenticated SUBMITTING checkpoint: canonical
+operation ID, kind, recipient/amount/fee, millisecond timestamp range/order/TTL,
+stored expiry floor, retained PSBT SHA-256, and locally signed txid. Recipient
+`scriptHex` must be bounded canonical hex but is non-authoritative: the native
+signer already validated the actual PSBT outputs against the local address and
+amount before storing its report. No fresh signing occurs during recovery.
+
+The gateway's unqueued read is not a no-broadcast proof. Both pending and expired
+states, including null txid/false `mayHaveBroadcast`, preserve SUBMITTING and
+return `operation.ambiguous`. A complete 410 `OP_EXPIRED` is treated the same way,
+not as a definitive terminal rejection. Matching completed BTC alone may become
+terminal success. The SDK performs at most one recovery GET per call and never
+automatically retries complete or prepares a replacement. A missing operation,
+invalid payload, mismatching intent/txid, or failed GET cannot release the signed
+evidence. Cancellation remains cancellation and preserves that evidence. Durable
+server broadcast/recovery ordering is still a release gate; full RGB/create-UTXO
+results cannot be recovered from this endpoint's current incomplete result schema.
+
+`UTEXOWallet.create` supplies this persistence automatically. CryptoKit
+AES-256-GCM authenticates the versioned snapshot against wallet/network, service,
+and Keychain namespace. The encrypted snapshot binds both the local account
+xpub identity and the gateway user. A device-bound, non-synchronizing Keychain
+record contains the AES key and committed/pending ciphertext hashes. The
+two-phase anchor makes an interrupted disk/Keychain write recoverable without
+accepting an older signed checkpoint after a completed commit. A lost key,
+deleted snapshot, changed identity, or failed authentication never starts an
+empty journal. Interrupted initial empty provisioning can resume with the
+original key and ciphertext only. Root/Keychain compromise is outside this
+guarantee; no software journal can recover if every copy and identity marker
+has been deliberately removed.
+
+Snapshot replacement synchronizes the temporary file and containing directory,
+including `F_FULLFSYNC` for the file. A process-wide wallet lease and a kernel
+file lock prevent cooperating instances/processes from owning the same store.
+The lock survives `shutdown` and is released on `destroy` or deallocation.
+Symlink/hard-linked snapshot files are rejected. Logical app-container-relative
+binding preserves normal iOS app upgrades; changing a dedicated external
+directory is an explicit migration and currently fails closed. Data is excluded
+from backups because its encryption key is device-bound. Keep a separate seed
+recovery backup; it cannot replace pending-operation/RGB-state recovery data.
+
+The 64 MiB snapshot ceiling bounds disk reads; the history also has a 100,000
+operation limit. Reaching either is a storage error, not permission to discard
+recovery identity. V2 terminal receipts remove only prepared/signed PSBT payloads
+after a definitive outcome, preserving every key, request hash, outcome and local
+validation report indefinitely within the wallet. Nonterminal records are never
+pruned or compacted. V1 histories migrate on the next successful atomic write;
+interrupted upgrades use the existing committed/pending recovery protocol.
+Older SDKs fail closed on v2 snapshots; downgrades are unsupported. Storage-budget
+qualification and cross-device wallet migration remain release work. Device lock, actual Keychain
+authentication/invalidation, and power-loss tests still require Apple-device
+validation; host tests use fault-injected Keychain persistence with real files.
+
+The app-facing API loads API credentials per request through a provider.
+`KeychainAPIKeyStore` uses `WhenUnlockedThisDeviceOnly`; credential rotation is
+explicit and checked against the same gateway user before wallet operations.
+Secrets are redacted in descriptions/reflection, but URLSession necessarily
+copies an Authorization header into process memory for the request.
+
 ## Production release gates
 
+- Keep the facade-only binary distribution and its strict external-consumer
+  gates passing. Private C/Swift modules are no longer dependencies of the root
+  product. Rebuild after source/native changes and verify the recorded complete
+  input/output inventories. This API boundary is not a same-process sandbox.
+- Inspect the signed app's aggregated privacy report and operator disclosures;
+  the SDK's own manifest and independent unsigned archive resource check are
+  necessary but are not App Store approval. See `PRIVACY.md`.
 - Freeze versioned backend profiles and test backend-produced golden PSBTs for
   every operation/network.
 - Add one-mutation rejection tests for all paths, scripts, outputs, fees,

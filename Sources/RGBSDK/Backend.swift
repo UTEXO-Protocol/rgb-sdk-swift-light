@@ -2,8 +2,9 @@ import Foundation
 
 /// Infrastructure-only service boundary used by `UTEXOWallet`.
 ///
-/// Application code calls the wallet facade. The SPI is public solely so a
-/// separately shipped UTEXO backend transport module can implement it.
+/// Application code calls the wallet facade. This SPI is available only when
+/// building the development sources; the facade-only binary distribution does
+/// not export its declarations or private transport/signing implementation.
 @_spi(Backend)
 public protocol WalletBackend: Sendable {
     /// Side-effect-free authorization/capability check performed immediately
@@ -32,12 +33,15 @@ public protocol WalletBackend: Sendable {
         context: BackendContext,
         request: OnchainReceiveRequest
     ) async throws -> OnchainReceiveResponse
+    /// Complete wallet transaction snapshot with normal synchronization.
+    /// A partial page or local operation journal is not a valid implementation.
     func listTransactions(context: BackendContext) async throws -> [Transaction]
     func listTransactions(
         context: BackendContext,
         txid: TransactionID,
         skipSync: Bool
     ) async throws -> [Transaction]
+    /// Complete transfer snapshot, across all assets when assetID is nil.
     func listTransfers(context: BackendContext, assetID: AssetID?) async throws -> [Transfer]
     func listTransfers(context: BackendContext, txid: TransactionID) async throws -> [Transfer]
     func failTransfers(context: BackendContext, request: FailTransfersRequest) async throws -> FailTransfersResult
@@ -84,12 +88,22 @@ public extension WalletBackend {
         context: BackendContext,
         txid: TransactionID,
         skipSync: Bool
-    ) async throws -> [Transaction] { throw unsupported(#function) }
+    ) async throws -> [Transaction] {
+        // A dedicated filtering endpoint is not necessary when the backend
+        // supplies the complete snapshot. Its normal sync cannot honor an
+        // explicit skipSync request, so adapters must override that variant.
+        guard !skipSync else { throw unsupported(#function) }
+        let transactions = try await listTransactions(context: context)
+        try Task.checkCancellation()
+        return transactions.filter { $0.txid == txid }
+    }
     func listTransfers(context: BackendContext, assetID: AssetID?) async throws -> [Transfer] {
         throw unsupported(#function)
     }
     func listTransfers(context: BackendContext, txid: TransactionID) async throws -> [Transfer] {
-        throw unsupported(#function)
+        let transfers = try await listTransfers(context: context, assetID: nil)
+        try Task.checkCancellation()
+        return transfers.filter { $0.txid == txid }
     }
     func failTransfers(context: BackendContext, request: FailTransfersRequest) async throws -> FailTransfersResult {
         throw unsupported(#function)

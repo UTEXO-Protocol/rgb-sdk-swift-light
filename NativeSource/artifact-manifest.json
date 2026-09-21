@@ -1,0 +1,199 @@
+{
+  "schema": "utexo.packaged-native-artifacts.v1",
+  "scope": "Complete file sets of the listed native/binding/facade/source/receipt roots. Not a signed release or a checksum of a final app, remote Maven archive or entire Git repository.",
+  "roots": [
+    "NativeSource/utexo-local-signer-source.tar.gz",
+    "NativeSource/dependencies.json",
+    "NativeSource/native-source.cdx.json",
+    "NativeSource/THIRD_PARTY_RUST_NOTICES.md",
+    "NativeSource/license-review.json",
+    "NativeSource/advisories.json",
+    "Generated",
+    "Artifacts/UtexoLocalSigner.xcframework",
+    "Artifacts/RGBSDK.xcframework",
+    "NativeSource/native-build.json",
+    "NativeSource/facade-build.json"
+  ],
+  "files": [
+    {
+      "path": "Artifacts/RGBSDK.xcframework/Info.plist",
+      "bytes": 1573,
+      "sha256": "8cff004a96807f461e46e4103b7df0e9d694e7c6f1eeb24da729eab3df3bc5dc"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/Info.plist",
+      "bytes": 578,
+      "sha256": "7ea14fc5af6518a986343c4eba9297d6a9ca3926b9d6d58bf8a46ce50618b641"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-ios.swiftinterface",
+      "bytes": 52094,
+      "sha256": "ba766f195049ab2bf04ba0ca8bb4c5e664db5ea1dbdc28c054b249ce28b7934c"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/PrivacyInfo.xcprivacy",
+      "bytes": 1612,
+      "sha256": "fd6dd7faf4c43a70320f4997e5786de4b7135bd9ddcd240cae6113b56401bbd8"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/RGBSDK",
+      "bytes": 10304328,
+      "sha256": "32779393bc994b67868edcaef9ab19be6f008945e241426e1343ac93e8202efd"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Info.plist",
+      "bytes": 578,
+      "sha256": "7ea14fc5af6518a986343c4eba9297d6a9ca3926b9d6d58bf8a46ce50618b641"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-ios-simulator.swiftinterface",
+      "bytes": 52104,
+      "sha256": "ed7ef6c3681cb42c27e559f75edd5c034ac647abf1f19c82c3eff1549c2c2a1e"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Modules/RGBSDK.swiftmodule/x86_64-apple-ios-simulator.swiftinterface",
+      "bytes": 52105,
+      "sha256": "2ed14b806aa8f61fded6f0f402c9c26e35c004f642e8d0359d845dbca322f1ef"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/PrivacyInfo.xcprivacy",
+      "bytes": 1612,
+      "sha256": "fd6dd7faf4c43a70320f4997e5786de4b7135bd9ddcd240cae6113b56401bbd8"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/RGBSDK",
+      "bytes": 20140392,
+      "sha256": "f6456bacd4bf49e98d4851842aa84232cca830e5ca0c6036a05bf51d183efbfc"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Info.plist",
+      "bytes": 578,
+      "sha256": "d060c7eb37f8e8477703a2c8cc49dccdd5c626ece86de0a509d27808980cf6c1"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-macos.swiftinterface",
+      "bytes": 52097,
+      "sha256": "7831f7e3e34dc7f20dac117aa58c8417c2291fbf4a0b957fb560091b9d782d00"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/x86_64-apple-macos.swiftinterface",
+      "bytes": 52098,
+      "sha256": "3a8ca58ad8e8d239673caab76f5b56bceac421758272f71f6843a2123c29926e"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/PrivacyInfo.xcprivacy",
+      "bytes": 1612,
+      "sha256": "fd6dd7faf4c43a70320f4997e5786de4b7135bd9ddcd240cae6113b56401bbd8"
+    },
+    {
+      "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/RGBSDK",
+      "bytes": 20556112,
+      "sha256": "1b5219015f5071939cfc4f50b6238cff2078b60cbdd079664799c45f88d821b7"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/Info.plist",
+      "bytes": 1756,
+      "sha256": "d762bd97c493feb45ebaaab98880a2e388c394b957360b9e53396b2d9711ec77"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64/Headers/UtexoLocalSignerFFI.h",
+      "bytes": 33828,
+      "sha256": "a757aed79116dd8eb9ac6afb5e45b3a5d59db7a468d1c52f12eda05a9827b40d"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64/Headers/module.modulemap",
+      "bytes": 148,
+      "sha256": "d8eaa5012d4c97dc8dad36c97f851780c1cca6dc98614f2227e6eb487c881a4f"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64/libutexo_local_signer.a",
+      "bytes": 7094192,
+      "sha256": "458a163b9f07ecf2e4ff3014e769db21fd3805a000799a61e281287409c4a8cc"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64_x86_64-simulator/Headers/UtexoLocalSignerFFI.h",
+      "bytes": 33828,
+      "sha256": "a757aed79116dd8eb9ac6afb5e45b3a5d59db7a468d1c52f12eda05a9827b40d"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
+      "bytes": 148,
+      "sha256": "d8eaa5012d4c97dc8dad36c97f851780c1cca6dc98614f2227e6eb487c881a4f"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/ios-arm64_x86_64-simulator/libutexo_local_signer.a",
+      "bytes": 13814704,
+      "sha256": "390abf974432c0b3148e9ed00378ed5bcbe654c62ab0038f122d1b60fcaf092e"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/macos-arm64_x86_64/Headers/UtexoLocalSignerFFI.h",
+      "bytes": 33828,
+      "sha256": "a757aed79116dd8eb9ac6afb5e45b3a5d59db7a468d1c52f12eda05a9827b40d"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/macos-arm64_x86_64/Headers/module.modulemap",
+      "bytes": 148,
+      "sha256": "d8eaa5012d4c97dc8dad36c97f851780c1cca6dc98614f2227e6eb487c881a4f"
+    },
+    {
+      "path": "Artifacts/UtexoLocalSigner.xcframework/macos-arm64_x86_64/libutexo_local_signer.a",
+      "bytes": 14154888,
+      "sha256": "9a0bf5521afdc04dddabed454c67d4f817fca05e396fa7d29444b058215b90d3"
+    },
+    {
+      "path": "Generated/UtexoLocalSignerBindings.swift",
+      "bytes": 115197,
+      "sha256": "8cb4697fc4b18c2d4bec191b16bda4fb18df60561064b9b691ad4bb2d85e19c2"
+    },
+    {
+      "path": "Generated/UtexoLocalSignerFFI.h",
+      "bytes": 33828,
+      "sha256": "a757aed79116dd8eb9ac6afb5e45b3a5d59db7a468d1c52f12eda05a9827b40d"
+    },
+    {
+      "path": "Generated/UtexoLocalSignerFFI.modulemap",
+      "bytes": 148,
+      "sha256": "d8eaa5012d4c97dc8dad36c97f851780c1cca6dc98614f2227e6eb487c881a4f"
+    },
+    {
+      "path": "NativeSource/THIRD_PARTY_RUST_NOTICES.md",
+      "bytes": 1300543,
+      "sha256": "0c17b2fd4794d81c96b4d6a08a67b8c47aca64e579893c07d47b8099b80acc54"
+    },
+    {
+      "path": "NativeSource/advisories.json",
+      "bytes": 423,
+      "sha256": "284c00d9ce3b4048c190a1fdc132fc228089eeda8fe5a3a06b83ebe135add580"
+    },
+    {
+      "path": "NativeSource/dependencies.json",
+      "bytes": 31826,
+      "sha256": "ec108f7469ab688a4255d6f4de0f04334c7a5e54e1e4cb157933fe455743e2e5"
+    },
+    {
+      "path": "NativeSource/facade-build.json",
+      "bytes": 7594,
+      "sha256": "f73d5cbacca327713b72a294b628d6a875e2f2d632ccd1f01cce6234b49f97ed"
+    },
+    {
+      "path": "NativeSource/license-review.json",
+      "bytes": 614,
+      "sha256": "abedec146d69f94445cf69d26f8cf11ad29431a0e2c92c376f9a580119419660"
+    },
+    {
+      "path": "NativeSource/native-build.json",
+      "bytes": 10734,
+      "sha256": "6393aa81d449916c9ddcaa3eef2f5001dc20db3ff661f97c71ac2710bc73de23"
+    },
+    {
+      "path": "NativeSource/native-source.cdx.json",
+      "bytes": 74047,
+      "sha256": "d56a1eeadf2f4a2181e6bb752d804e6c4724f90ac46b424c1cba531d813f04c0"
+    },
+    {
+      "path": "NativeSource/utexo-local-signer-source.tar.gz",
+      "bytes": 263495,
+      "sha256": "503ae13fa6ac02ca92b1de8c11106b5c509cb754b954dbd132bf21e62309770f"
+    }
+  ]
+}

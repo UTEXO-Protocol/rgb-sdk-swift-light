@@ -4,14 +4,55 @@ struct OperationCoordinator: Sendable {
     let configuration: WalletConfiguration
     let backend: any WalletBackend
     let journal: any OperationJournal
-    let now: @Sendable () -> UInt64
+    let now: @Sendable () throws -> UInt64
 
     func sendBtc(
         backendContext: BackendContext,
         signer: any LocalSigningEngine,
         request: SendBtcRequest
     ) async throws -> TransactionID {
-        let hash = try RequestHasher.sendBtc(network: configuration.network, request: request)
+        let result = try await execute(
+            backendContext: backendContext, signer: signer, request: .sendBtc(request))
+        return try requireSendBtcResult(result.result, validation: result.validation)
+    }
+
+    func createUtxos(
+        backendContext: BackendContext, signer: any LocalSigningEngine, request: CreateUtxosRequest
+    ) async throws -> CreateUtxosResult {
+        let result = try await execute(
+            backendContext: backendContext, signer: signer, request: .createUtxos(request))
+        guard case .createUtxos(_, let value) = result.result else {
+            throw SDKError.operationAmbiguous(result.result.operationID)
+        }
+        // Compact terminal receipts deliberately omit the exact output plan.
+        // Authenticated original result and request identity remain, so check
+        // their representable count without requiring a discarded PSBT.
+        guard value.createdUtxoCount >= 1, value.createdUtxoCount <= (request.num ?? 5),
+            value.txid == result.validation.unsignedTxid
+        else {
+            throw SDKError.operationAmbiguous(result.result.operationID)
+        }
+        return value
+    }
+
+    func onchainSend(
+        backendContext: BackendContext, signer: any LocalSigningEngine, request: OnchainSendRequest
+    ) async throws -> OnchainSendResponse {
+        let result = try await execute(
+            backendContext: backendContext, signer: signer, request: .onchainSend(request))
+        guard case .onchainSend(_, let value) = result.result else {
+            throw SDKError.operationAmbiguous(result.result.operationID)
+        }
+        guard value.txid == result.validation.unsignedTxid else {
+            throw SDKError.operationAmbiguous(result.result.operationID)
+        }
+        return value
+    }
+
+    private func execute(
+        backendContext: BackendContext, signer: any LocalSigningEngine, request: LocalOperationRequest
+    ) async throws -> (result: BackendOperationResult, validation: LocalValidationReport) {
+        let hash = try request.hash(network: configuration.network)
         let context = OperationRequestContext(
             backend: backendContext,
             idempotencyKey: request.idempotencyKey,
@@ -22,27 +63,27 @@ struct OperationCoordinator: Sendable {
             context: context,
             signer: signer,
             request: request,
-            operation: .sendBtc
+            operation: request.kind
         ) {
-            return try requireSendBtcResult(recovered.result, validation: recovered.validation)
+            return recovered
         }
 
         let prepared = try await backendCall {
-            try await backend.prepareSendBtc(.init(context: context, request: request))
+            try await request.prepare(backend: backend, context: context)
         }
-        try verifyPrepared(prepared, context: context, operation: .sendBtc)
+        try verifyPrepared(prepared, context: context, operation: request.kind)
+        try request.verifyPreparedPlan(prepared, policy: configuration.signingPolicy)
         try await save(prepared, phase: .prepared)
         try await rejectExpiredBeforeSigning(prepared)
 
         // Prepare is a remote suspension point. Re-check a dynamic backend
         // policy before local signing; denial leaves the exact PREPARED state
         // recoverable and never advances toward submission.
-        try await preflightRiskyTransition(operation: .sendBtc, request: request)
+        try await preflightRiskyTransition(operation: request.kind, request: request, signer: signer)
         try await rejectExpiredBeforeSigning(prepared)
-        let signed = try signer.validateAndSign(
-            prepared: prepared,
-            request: request,
-            policy: configuration.signingPolicy
+        let signed = try request.validateAndSign(
+            signer: signer, prepared: prepared,
+            policy: configuration.signingPolicy, now: validationTime(for: request)
         )
         try await save(
             prepared,
@@ -55,27 +96,29 @@ struct OperationCoordinator: Sendable {
             context: context,
             prepared: prepared,
             signed: signed,
-            request: request
+            request: request,
+            signer: signer
         )
-        return try requireSendBtcResult(result, validation: signed.validation)
+        return (result, signed.validation)
     }
 
     private func recoverExisting(
         context: OperationRequestContext,
         signer: any LocalSigningEngine,
-        request: SendBtcRequest,
+        request: LocalOperationRequest,
         operation: OperationKind
     ) async throws -> (result: BackendOperationResult, validation: LocalValidationReport)? {
-        guard let checkpoint = try await journalCall({
-            try await journal.load(
-                walletID: configuration.walletID,
-                idempotencyKey: context.idempotencyKey
-            )
+        guard
+            let checkpoint = try await journalCall({
+                try await journal.load(
+                    walletID: configuration.walletID,
+                    idempotencyKey: context.idempotencyKey
+                )
         }) else {
             // A new operation must pass an adapter's side-effect-free gate
             // before even CREATED is persisted. A disabled provisional
             // profile therefore leaves no misleading recovery state behind.
-            try await preflightRiskyTransition(operation: operation, request: request)
+            try await preflightRiskyTransition(operation: operation, request: request, signer: signer)
             try await journalCall {
                 try await journal.save(
                 .init(
@@ -117,20 +160,20 @@ struct OperationCoordinator: Sendable {
 
         switch checkpoint.phase {
         case .created:
-            try await preflightRiskyTransition(operation: operation, request: request)
+            try await preflightRiskyTransition(operation: operation, request: request, signer: signer)
             return nil
         case .prepared:
             guard let prepared = checkpoint.preparedTransaction else {
                 throw SDKError.invariant("prepared checkpoint has no exact preparation")
             }
             try verifyPrepared(prepared, context: context, operation: operation)
+            try request.verifyPreparedPlan(prepared, policy: configuration.signingPolicy)
             try await rejectExpiredBeforeSigning(prepared)
-            try await preflightRiskyTransition(operation: operation, request: request)
+            try await preflightRiskyTransition(operation: operation, request: request, signer: signer)
             try await rejectExpiredBeforeSigning(prepared)
-            let signed = try signer.validateAndSign(
-                prepared: prepared,
-                request: request,
-                policy: configuration.signingPolicy
+            let signed = try request.validateAndSign(
+                signer: signer, prepared: prepared,
+                policy: configuration.signingPolicy, now: validationTime(for: request)
             )
             try await save(
                 prepared,
@@ -142,7 +185,8 @@ struct OperationCoordinator: Sendable {
                 context: context,
                 prepared: prepared,
                 signed: signed,
-                request: request
+                request: request,
+                signer: signer
             )
             return (result, signed.validation)
         case .signed:
@@ -152,7 +196,8 @@ struct OperationCoordinator: Sendable {
                 throw SDKError.invariant("signed checkpoint is incomplete")
             }
             try verifyPrepared(prepared, context: context, operation: operation)
-            guard prepared.expiresAt.rawValue > now() else {
+            try request.verifyPreparedPlan(prepared, policy: configuration.signingPolicy)
+            guard try prepared.expiresAt.rawValue > now() else {
                 try await saveTerminal(
                     prepared: prepared,
                     signed: .init(signedPsbtBase64: signedPsbtBase64, validation: validation),
@@ -160,12 +205,13 @@ struct OperationCoordinator: Sendable {
                 )
                 throw SDKError.operationExpired(prepared.operationID)
             }
-            try await preflightRiskyTransition(operation: operation, request: request)
+            try await preflightRiskyTransition(operation: operation, request: request, signer: signer)
             let result = try await submit(
                 context: context,
                 prepared: prepared,
                 signed: .init(signedPsbtBase64: signedPsbtBase64, validation: validation),
-                request: request
+                request: request,
+                signer: signer
             )
             return (result, validation)
         case .submitting:
@@ -178,7 +224,8 @@ struct OperationCoordinator: Sendable {
             let result = try await reconcile(
                 context: context,
                 operationID: operationID,
-                checkpoint: checkpoint
+                checkpoint: checkpoint,
+                request: request
             )
             return (result, validation)
         case .terminal:
@@ -188,7 +235,8 @@ struct OperationCoordinator: Sendable {
 
     private func preflightRiskyTransition(
         operation: OperationKind,
-        request: SendBtcRequest
+        request: LocalOperationRequest,
+        signer: any LocalSigningEngine
     ) async throws {
         // Terminal outcomes must always replay and SUBMITTING must always be
         // allowed to perform status-only reconciliation after a restart, even
@@ -198,8 +246,27 @@ struct OperationCoordinator: Sendable {
         guard request.feeRate <= configuration.signingPolicy.maximumFeeRate else {
             throw SDKError.policyRejected("requested fee rate exceeds the app-owned limit")
         }
+        if operation != .sendBtc {
+            let capabilities = signer.capabilities
+            guard capabilities.localTransactionValidation, capabilities.localTransactionSigning,
+                  capabilities.localSigningOperations.contains(operation) else {
+                throw SDKError.unsupported("local operation-specific signing authorization")
+            }
+        }
+        if case .onchainSend(let rgbRequest) = request {
+            guard signer.capabilities.localRGBInvoiceParsing else { throw SDKError.unsupported("local RGB invoice parsing") }
+            _ = try validateOutgoingRGBInvoice(rgbRequest, network: configuration.network, now: now())
+        }
+        if let gateway = backend as? GatewayWalletBackend {
+            try await gateway.validateRequest(request)
+        }
         try await backendCall {
             try await backend.preflightOperation(operation)
+        }
+        // A capability check may suspend. Recheck local invoice expiry after
+        // it returns; even CREATED must not be persisted for an expired intent.
+        if case .onchainSend(let rgbRequest) = request {
+            _ = try validateOutgoingRGBInvoice(rgbRequest, network: configuration.network, now: now())
         }
     }
 
@@ -207,7 +274,8 @@ struct OperationCoordinator: Sendable {
         context: OperationRequestContext,
         prepared: PreparedTransaction,
         signed: LocalSigningResult,
-        request: SendBtcRequest
+        request: LocalOperationRequest,
+        signer: any LocalSigningEngine
     ) async throws -> BackendOperationResult {
         let operationID = prepared.operationID
         // Signing and an earlier preflight may take time or cross an actor
@@ -215,15 +283,21 @@ struct OperationCoordinator: Sendable {
         // dynamic backend gate, then re-run that side-effect-free policy. A
         // final expiry check closes the suspension window immediately before
         // recording SUBMITTING. A gate failure leaves the checkpoint SIGNED;
-        // expiry is terminal and retains the exact signed payload.
+        // expiry is terminal and retains immutable replay/validation evidence
+        // (the durable journal may then compact its no-longer-submittable PSBTs).
         try await rejectExpiredBeforeSubmission(prepared: prepared, signed: signed)
-        try await preflightRiskyTransition(operation: .sendBtc, request: request)
+        try await preflightRiskyTransition(operation: request.kind, request: request, signer: signer)
+        try request.validateBeforeSubmission(
+            signer: signer, prepared: prepared,
+            policy: configuration.signingPolicy,
+            retained: signed.validation, now: validationTime(for: request)
+        )
         try await rejectExpiredBeforeSubmission(prepared: prepared, signed: signed)
         let preparedCheckpoint = try OperationCheckpoint(
             walletID: configuration.walletID,
             idempotencyKey: context.idempotencyKey,
             requestHash: context.requestHash,
-            operationKind: .sendBtc,
+            operationKind: request.kind,
             phase: .submitting,
             operationID: operationID,
             preparedTransaction: prepared,
@@ -241,21 +315,25 @@ struct OperationCoordinator: Sendable {
 
         do {
             let result = try await backendCall {
-                try await backend.submitSignedTransaction(submission)
+                if let gateway = backend as? GatewayWalletBackend, request.kind == .createUtxos {
+                    return try await gateway.submitCreateUtxos(submission, prepared: prepared)
+                }
+                return try await backend.submitSignedTransaction(submission)
             }
             try verifyResult(
                 result,
                 operationID: operationID,
-                operation: .sendBtc,
+                operation: request.kind,
                 validation: signed.validation
             )
+            try request.verifyResult(result, prepared: prepared)
             try await journalCall {
                 try await journal.save(
                 .init(
                     walletID: configuration.walletID,
                     idempotencyKey: context.idempotencyKey,
                     requestHash: context.requestHash,
-                    operationKind: .sendBtc,
+                    operationKind: request.kind,
                     phase: .terminal,
                     operationID: operationID,
                     preparedTransaction: prepared,
@@ -315,17 +393,19 @@ struct OperationCoordinator: Sendable {
                 backendCode: backendCode,
                 correlationID: correlationID
             )
-        } catch let error as SDKError where error.code == .backendUnavailable {
+        } catch let error as SDKError where error.code == .backendUnavailable
+            || (backend is GatewayWalletBackend
+                && error.code == .operationAmbiguous && error.operationID == operationID) {
             return try await reconcile(
                 context: context,
                 operationID: operationID,
-                checkpoint: preparedCheckpoint
+                checkpoint: preparedCheckpoint,
+                request: request
             )
         }
-        // OperationConflict and a definitive completion-contract mismatch are
-        // propagated above this boundary. The current terminal journal model
-        // cannot encode those blockers, and neither condition authorizes an
-        // automatic repeat of the completion request.
+        // Other injected-backend errors propagate without authorizing another
+        // completion request. The gateway maps every unproven completion 4xx,
+        // including known idempotency/kind conflicts, to bound ambiguity above.
     }
 
     private func rejectExpiredBeforeSubmission(
@@ -333,7 +413,7 @@ struct OperationCoordinator: Sendable {
         signed: LocalSigningResult
     ) async throws {
         let operationID = prepared.operationID
-        guard prepared.expiresAt.rawValue > now() else {
+        guard try prepared.expiresAt.rawValue > now() else {
             try await saveTerminal(
                 prepared: prepared,
                 signed: signed,
@@ -345,7 +425,7 @@ struct OperationCoordinator: Sendable {
 
     private func rejectExpiredBeforeSigning(_ prepared: PreparedTransaction) async throws {
         let operationID = prepared.operationID
-        guard prepared.expiresAt.rawValue > now() else {
+        guard try prepared.expiresAt.rawValue > now() else {
             try await saveTerminal(
                 prepared: prepared,
                 signed: nil,
@@ -358,12 +438,31 @@ struct OperationCoordinator: Sendable {
     private func reconcile(
         context: OperationRequestContext,
         operationID: OperationID,
-        checkpoint: OperationCheckpoint
+        checkpoint: OperationCheckpoint,
+        request: LocalOperationRequest
     ) async throws -> BackendOperationResult {
         let status: BackendOperationStatus
         do {
             status = try await backendCall {
-                try await backend.getOperation(context: context.backend, operationID: operationID)
+                // The gateway's status is not an authoritative negative
+                // outcome and carries no request hash. Bind it to the exact
+                // authenticated local evidence without widening the public
+                // backend protocol or exposing PSBTs to applications.
+                if let gateway = backend as? GatewayWalletBackend {
+                    switch request {
+                    case .sendBtc(let btcRequest):
+                        return try await gateway.getOperationForRecovery(
+                            context: context.backend, checkpoint: checkpoint, request: btcRequest
+                        )
+                    case .createUtxos(let createRequest):
+                        return try await gateway.getOperationForRecovery(
+                            context: context.backend, checkpoint: checkpoint, request: createRequest
+                        )
+                    case .onchainSend:
+                        throw SDKError.operationAmbiguous(operationID)
+                    }
+                }
+                return try await backend.getOperation(context: context.backend, operationID: operationID)
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -389,6 +488,7 @@ struct OperationCoordinator: Sendable {
                 operation: checkpoint.operationKind,
                 validation: validation
             )
+            try request.verifyResult(result, prepared: checkpoint.preparedTransaction)
             try await journalCall {
                 try await journal.save(
                 .init(
@@ -460,6 +560,11 @@ struct OperationCoordinator: Sendable {
                 correlationID: prepared.correlationID
             )
         }
+    }
+
+    private func validationTime(for request: LocalOperationRequest) throws -> UInt64 {
+        if case .onchainSend = request { return try now() }
+        return 0
     }
 
     private func verifyResult(

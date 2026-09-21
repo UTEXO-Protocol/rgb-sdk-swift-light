@@ -11,7 +11,10 @@ import Foundation
 /// atomically writing it to storage.
 @_spi(Backend)
 public enum OperationCheckpointCodec {
+    /// Full-record wire version, retained for existing infrastructure clients.
+    /// Compact terminal receipts use version 2; decode accepts both versions.
     public static let schemaVersion: UInt32 = 1
+    static let compactTerminalSchemaVersion: UInt32 = 2
     public static let maximumEncodedBytes = 16_000_000
 
     private static let checksumBytes = 32
@@ -21,8 +24,13 @@ public enum OperationCheckpointCodec {
         do {
             var writer = CheckpointWriter()
             writer.append(magic)
-            writer.append(schemaVersion)
-            try writer.append(checkpoint)
+            if checkpoint.phase == .terminal, checkpoint.preparedTransaction == nil {
+                writer.append(compactTerminalSchemaVersion)
+                try writer.appendCompactTerminal(checkpoint)
+            } else {
+                writer.append(schemaVersion)
+                try writer.append(checkpoint)
+            }
             let body = writer.data
             guard body.count <= maximumEncodedBytes - checksumBytes else {
                 throw SDKError.operationJournalUnavailable
@@ -42,7 +50,9 @@ public enum OperationCheckpointCodec {
                   encoded.count <= maximumEncodedBytes else {
                 throw SDKError.operationJournalUnavailable
             }
-            let bodyEnd = encoded.count - checksumBytes
+            // A Data.SubSequence is also Data and may retain a nonzero start
+            // index. Count is a length, never an absolute collection index.
+            let bodyEnd = encoded.index(encoded.endIndex, offsetBy: -checksumBytes)
             let body = Data(encoded[..<bodyEnd])
             let expectedDigest = encoded[bodyEnd...]
             let actualDigest = SHA256.hash(data: body)
@@ -51,11 +61,15 @@ public enum OperationCheckpointCodec {
             }
 
             var reader = CheckpointReader(data: body)
-            guard try reader.readData(count: magic.count) == magic,
-                  try reader.readUInt32() == schemaVersion else {
+            guard try reader.readData(count: magic.count) == magic else {
                 throw SDKError.operationJournalUnavailable
             }
-            let checkpoint = try reader.readCheckpoint()
+            let checkpoint: OperationCheckpoint
+            switch try reader.readUInt32() {
+            case schemaVersion: checkpoint = try reader.readCheckpoint()
+            case compactTerminalSchemaVersion: checkpoint = try reader.readCompactTerminal()
+            default: throw SDKError.operationJournalUnavailable
+            }
             guard reader.isAtEnd else { throw SDKError.operationJournalUnavailable }
             return checkpoint
         } catch {
@@ -66,6 +80,23 @@ public enum OperationCheckpointCodec {
 
 private struct CheckpointWriter {
     private(set) var data = Data()
+
+    mutating func appendCompactTerminal(_ checkpoint: OperationCheckpoint) throws {
+        guard checkpoint.phase == .terminal, checkpoint.preparedTransaction == nil,
+              checkpoint.signedPsbtBase64 == nil,
+              let operationID = checkpoint.operationID,
+              let outcome = checkpoint.terminalOutcome else {
+            throw SDKError.operationJournalUnavailable
+        }
+        try append(checkpoint.walletID.value, maximumBytes: 128)
+        try append(checkpoint.idempotencyKey.value, maximumBytes: 128)
+        try append(checkpoint.requestHash.hex, maximumBytes: 64)
+        try append(checkpoint.operationKind.rawValue, maximumBytes: 32)
+        try append(checkpoint.phase.wireValue, maximumBytes: 32)
+        try append(operationID.value, maximumBytes: 128)
+        try appendOptional(checkpoint.validation) { writer, value in try writer.append(value) }
+        try append(outcome)
+    }
 
     mutating func append(_ checkpoint: OperationCheckpoint) throws {
         try append(checkpoint.walletID.value, maximumBytes: 128)
@@ -223,6 +254,23 @@ private struct CheckpointReader {
 
     var isAtEnd: Bool { offset == data.count }
 
+    mutating func readCompactTerminal() throws -> OperationCheckpoint {
+        let walletID = try WalletID(readString(maximumBytes: 128))
+        let idempotencyKey = try IdempotencyKey(readString(maximumBytes: 128))
+        let requestHash = try RequestHash(validating: readString(maximumBytes: 64))
+        guard let operationKind = OperationKind(rawValue: try readString(maximumBytes: 32)),
+              try readString(maximumBytes: 32) == "terminal" else {
+            throw SDKError.operationJournalUnavailable
+        }
+        return try OperationCheckpoint(
+            walletID: walletID, idempotencyKey: idempotencyKey,
+            requestHash: requestHash, operationKind: operationKind,
+            phase: .terminal, operationID: OperationID(readString(maximumBytes: 128)),
+            validation: readOptional { reader in try reader.readValidation() },
+            terminalOutcome: readOutcome()
+        )
+    }
+
     mutating func readCheckpoint() throws -> OperationCheckpoint {
         let walletID = try WalletID(readString(maximumBytes: 128))
         let idempotencyKey = try IdempotencyKey(readString(maximumBytes: 128))
@@ -242,6 +290,11 @@ private struct CheckpointReader {
             )
         }
         let outcome = try readOptional { reader in try reader.readOutcome() }
+        // V1 never represented compact receipts. Keep its historical shape
+        // strict, and reserve omission of terminal payloads for version 2.
+        guard phase == .created || prepared != nil else {
+            throw SDKError.operationJournalUnavailable
+        }
         return try OperationCheckpoint(
             walletID: walletID,
             idempotencyKey: idempotencyKey,

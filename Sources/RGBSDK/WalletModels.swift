@@ -376,6 +376,9 @@ public struct AssetIFA: Hashable, Sendable {
         rejectListURL: URL? = nil
     ) throws {
         guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
+        guard initialSupply <= maximumSupply, knownCirculatingSupply <= maximumSupply else {
+            throw SDKError.invalidArgument("supply", "must not exceed maximumSupply")
+        }
         self.assetID = assetID
         self.ticker = try requireBoundedText(ticker, field: "ticker", maximumUTF8Bytes: 16)
         self.name = try requireBoundedText(name, field: "name", maximumUTF8Bytes: 256)

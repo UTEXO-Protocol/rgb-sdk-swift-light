@@ -497,6 +497,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    package static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -610,6 +626,15 @@ package protocol LocalSignerProtocol: AnyObject, Sendable {
     func identity() throws  -> WalletIdentity
     
     /**
+     * Validates, signs and finalizes the additive gateway profile. It never
+     * changes the prepared transaction's locktime, scripts or amounts.
+     *
+     * # Errors
+     * Returns a policy error before signing or a signature verification error.
+     */
+    func signGatewayPsbt(psbtBase64: String, intent: GatewaySigningIntent) throws  -> SigningResult
+    
+    /**
      * RN-compatible legacy account message signature: SHA256(message), then a
      * BIP340 Schnorr signature at vanilla account child /0/0, base64 encoded.
      * This is not BIP322 and must not be reused as a generic login protocol.
@@ -623,7 +648,9 @@ package protocol LocalSignerProtocol: AnyObject, Sendable {
     func signMessage(messageUtf8: Data) throws  -> String
     
     /**
-     * Re-runs all policy checks, then signs every approved BIP86 key-path input.
+     * Re-runs all policy checks, then signs and finalizes every approved BIP86
+     * key-path input. The returned PSBT contains a verified final witness;
+     * consumed input signing metadata is removed per BIP174/BIP371.
      *
      * # Errors
      *
@@ -631,6 +658,16 @@ package protocol LocalSignerProtocol: AnyObject, Sendable {
      * input cannot be signed by this wallet.
      */
     func signPsbt(psbtBase64: String, intent: SigningIntent) throws  -> SigningResult
+    
+    /**
+     * Validates a branch-0 RGB-lib builder preparation against independent
+     * height/fee bounds and operation-specific caller authorization. RGB
+     * transitions and consignment validity remain server-trusted.
+     *
+     * # Errors
+     * Returns a validation error for malformed or unauthorized preparations.
+     */
+    func validateGatewayPsbt(psbtBase64: String, intent: GatewaySigningIntent) throws  -> ValidationReport
     
     /**
      * Parses and validates a PSBT against the immutable caller intent without
@@ -773,6 +810,24 @@ package func identity()throws  -> WalletIdentity  {
 }
     
     /**
+     * Validates, signs and finalizes the additive gateway profile. It never
+     * changes the prepared transaction's locktime, scripts or amounts.
+     *
+     * # Errors
+     * Returns a policy error before signing or a signature verification error.
+     */
+package func signGatewayPsbt(psbtBase64: String, intent: GatewaySigningIntent)throws  -> SigningResult  {
+    return try  FfiConverterTypeSigningResult_lift(try rustCallWithError(FfiConverterTypeSignerError_lift) {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_method_localsigner_sign_gateway_psbt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(psbtBase64),
+        FfiConverterTypeGatewaySigningIntent_lower(intent),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * RN-compatible legacy account message signature: SHA256(message), then a
      * BIP340 Schnorr signature at vanilla account child /0/0, base64 encoded.
      * This is not BIP322 and must not be reused as a generic login protocol.
@@ -794,7 +849,9 @@ package func signMessage(messageUtf8: Data)throws  -> String  {
 }
     
     /**
-     * Re-runs all policy checks, then signs every approved BIP86 key-path input.
+     * Re-runs all policy checks, then signs and finalizes every approved BIP86
+     * key-path input. The returned PSBT contains a verified final witness;
+     * consumed input signing metadata is removed per BIP174/BIP371.
      *
      * # Errors
      *
@@ -808,6 +865,25 @@ package func signPsbt(psbtBase64: String, intent: SigningIntent)throws  -> Signi
             self.uniffiCloneHandle(),
         FfiConverterString.lower(psbtBase64),
         FfiConverterTypeSigningIntent_lower(intent),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Validates a branch-0 RGB-lib builder preparation against independent
+     * height/fee bounds and operation-specific caller authorization. RGB
+     * transitions and consignment validity remain server-trusted.
+     *
+     * # Errors
+     * Returns a validation error for malformed or unauthorized preparations.
+     */
+package func validateGatewayPsbt(psbtBase64: String, intent: GatewaySigningIntent)throws  -> ValidationReport  {
+    return try  FfiConverterTypeValidationReport_lift(try rustCallWithError(FfiConverterTypeSignerError_lift) {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_method_localsigner_validate_gateway_psbt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(psbtBase64),
+        FfiConverterTypeGatewaySigningIntent_lower(intent),uniffiCallStatus
     )
 })
 }
@@ -880,6 +956,165 @@ package func FfiConverterTypeLocalSigner_lower(_ value: LocalSigner) -> UInt64 {
 
 
 
+/**
+ * Locally authorized range of newly created colored outputs. Bounds must be
+ * derived from the caller's request, not copied from the server's PSBT.
+ */
+package struct CreateUtxosAuthorization: Equatable, Hashable {
+    package var minCount: UInt32
+    package var maxCount: UInt32
+    package var sizeSats: UInt64
+    package var exactOutputs: [GatewayOwnedOutput]?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(minCount: UInt32, maxCount: UInt32, sizeSats: UInt64, exactOutputs: [GatewayOwnedOutput]?) {
+        self.minCount = minCount
+        self.maxCount = maxCount
+        self.sizeSats = sizeSats
+        self.exactOutputs = exactOutputs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreateUtxosAuthorization: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeCreateUtxosAuthorization: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreateUtxosAuthorization {
+        return
+            try CreateUtxosAuthorization(
+                minCount: FfiConverterUInt32.read(from: &buf), 
+                maxCount: FfiConverterUInt32.read(from: &buf), 
+                sizeSats: FfiConverterUInt64.read(from: &buf), 
+                exactOutputs: FfiConverterOptionSequenceTypeGatewayOwnedOutput.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: CreateUtxosAuthorization, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.minCount, into: &buf)
+        FfiConverterUInt32.write(value.maxCount, into: &buf)
+        FfiConverterUInt64.write(value.sizeSats, into: &buf)
+        FfiConverterOptionSequenceTypeGatewayOwnedOutput.write(value.exactOutputs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeCreateUtxosAuthorization_lift(_ buf: RustBuffer) throws -> CreateUtxosAuthorization {
+    return try FfiConverterTypeCreateUtxosAuthorization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeCreateUtxosAuthorization_lower(_ value: CreateUtxosAuthorization) -> RustBuffer {
+    return FfiConverterTypeCreateUtxosAuthorization.lower(value)
+}
+
+
+/**
+ * Locally decoded, compatibility-shaped RGB invoice data.
+ *
+ * The original invoice is intentionally not duplicated in this native DTO;
+ * Swift and Kotlin already hold the bounded input value and attach it to their
+ * public `InvoiceData` model.
+ */
+package struct DecodedRgbInvoice: Equatable, Hashable {
+    package var recipientId: String
+    package var recipientType: RgbInvoiceRecipientType
+    package var assetSchema: String?
+    package var assetId: String?
+    package var network: Network
+    package var assignment: RgbInvoiceAssignment
+    package var encodedState: RgbInvoiceEncodedState
+    package var assignmentName: String?
+    package var expirationTimestamp: Int64?
+    package var transportEndpoints: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(recipientId: String, recipientType: RgbInvoiceRecipientType, assetSchema: String?, assetId: String?, network: Network, assignment: RgbInvoiceAssignment, encodedState: RgbInvoiceEncodedState, assignmentName: String?, expirationTimestamp: Int64?, transportEndpoints: [String]) {
+        self.recipientId = recipientId
+        self.recipientType = recipientType
+        self.assetSchema = assetSchema
+        self.assetId = assetId
+        self.network = network
+        self.assignment = assignment
+        self.encodedState = encodedState
+        self.assignmentName = assignmentName
+        self.expirationTimestamp = expirationTimestamp
+        self.transportEndpoints = transportEndpoints
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DecodedRgbInvoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeDecodedRgbInvoice: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DecodedRgbInvoice {
+        return
+            try DecodedRgbInvoice(
+                recipientId: FfiConverterString.read(from: &buf), 
+                recipientType: FfiConverterTypeRgbInvoiceRecipientType.read(from: &buf), 
+                assetSchema: FfiConverterOptionString.read(from: &buf), 
+                assetId: FfiConverterOptionString.read(from: &buf), 
+                network: FfiConverterTypeNetwork.read(from: &buf), 
+                assignment: FfiConverterTypeRgbInvoiceAssignment.read(from: &buf), 
+                encodedState: FfiConverterTypeRgbInvoiceEncodedState.read(from: &buf), 
+                assignmentName: FfiConverterOptionString.read(from: &buf), 
+                expirationTimestamp: FfiConverterOptionInt64.read(from: &buf), 
+                transportEndpoints: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: DecodedRgbInvoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recipientId, into: &buf)
+        FfiConverterTypeRgbInvoiceRecipientType.write(value.recipientType, into: &buf)
+        FfiConverterOptionString.write(value.assetSchema, into: &buf)
+        FfiConverterOptionString.write(value.assetId, into: &buf)
+        FfiConverterTypeNetwork.write(value.network, into: &buf)
+        FfiConverterTypeRgbInvoiceAssignment.write(value.assignment, into: &buf)
+        FfiConverterTypeRgbInvoiceEncodedState.write(value.encodedState, into: &buf)
+        FfiConverterOptionString.write(value.assignmentName, into: &buf)
+        FfiConverterOptionInt64.write(value.expirationTimestamp, into: &buf)
+        FfiConverterSequenceString.write(value.transportEndpoints, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeDecodedRgbInvoice_lift(_ buf: RustBuffer) throws -> DecodedRgbInvoice {
+    return try FfiConverterTypeDecodedRgbInvoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeDecodedRgbInvoice_lower(_ value: DecodedRgbInvoice) -> RustBuffer {
+    return FfiConverterTypeDecodedRgbInvoice.lower(value)
+}
+
+
 package struct DerivedAddress: Equatable, Hashable {
     package var address: String
     package var scriptPubkeyHex: String
@@ -939,6 +1174,144 @@ package func FfiConverterTypeDerivedAddress_lift(_ buf: RustBuffer) throws -> De
 #endif
 package func FfiConverterTypeDerivedAddress_lower(_ value: DerivedAddress) -> RustBuffer {
     return FfiConverterTypeDerivedAddress.lower(value)
+}
+
+
+/**
+ * An optional exact reservation of a created colored output, re-derived
+ * locally and compared to the transaction. Vanilla change is not in this plan.
+ */
+package struct GatewayOwnedOutput: Equatable, Hashable {
+    package var account: AccountKind
+    package var keychain: Keychain
+    package var index: UInt32
+    package var amountSats: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(account: AccountKind, keychain: Keychain, index: UInt32, amountSats: UInt64) {
+        self.account = account
+        self.keychain = keychain
+        self.index = index
+        self.amountSats = amountSats
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GatewayOwnedOutput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeGatewayOwnedOutput: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GatewayOwnedOutput {
+        return
+            try GatewayOwnedOutput(
+                account: FfiConverterTypeAccountKind.read(from: &buf), 
+                keychain: FfiConverterTypeKeychain.read(from: &buf), 
+                index: FfiConverterUInt32.read(from: &buf), 
+                amountSats: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: GatewayOwnedOutput, into buf: inout [UInt8]) {
+        FfiConverterTypeAccountKind.write(value.account, into: &buf)
+        FfiConverterTypeKeychain.write(value.keychain, into: &buf)
+        FfiConverterUInt32.write(value.index, into: &buf)
+        FfiConverterUInt64.write(value.amountSats, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeGatewayOwnedOutput_lift(_ buf: RustBuffer) throws -> GatewayOwnedOutput {
+    return try FfiConverterTypeGatewayOwnedOutput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeGatewayOwnedOutput_lower(_ value: GatewayOwnedOutput) -> RustBuffer {
+    return FfiConverterTypeGatewayOwnedOutput.lower(value)
+}
+
+
+/**
+ * Additive, explicitly selected profile for the RGB-lib branch-0 builder.
+ * `max_block_height` must come from an independently trusted chain context,
+ * never from the prepared PSBT. The fee target is not the independent hard
+ * maximum in `intent.policy`; both constraints are enforced.
+ */
+package struct GatewaySigningIntent: Equatable, Hashable {
+    package var intent: SigningIntent
+    package var maxBlockHeight: UInt32
+    package var targetFeeRateMsatPerVbyte: UInt64
+    package var createUtxos: CreateUtxosAuthorization?
+    package var rgb: RgbBitcoinAuthorization?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(intent: SigningIntent, maxBlockHeight: UInt32, targetFeeRateMsatPerVbyte: UInt64, createUtxos: CreateUtxosAuthorization?, rgb: RgbBitcoinAuthorization?) {
+        self.intent = intent
+        self.maxBlockHeight = maxBlockHeight
+        self.targetFeeRateMsatPerVbyte = targetFeeRateMsatPerVbyte
+        self.createUtxos = createUtxos
+        self.rgb = rgb
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GatewaySigningIntent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeGatewaySigningIntent: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GatewaySigningIntent {
+        return
+            try GatewaySigningIntent(
+                intent: FfiConverterTypeSigningIntent.read(from: &buf), 
+                maxBlockHeight: FfiConverterUInt32.read(from: &buf), 
+                targetFeeRateMsatPerVbyte: FfiConverterUInt64.read(from: &buf), 
+                createUtxos: FfiConverterOptionTypeCreateUtxosAuthorization.read(from: &buf), 
+                rgb: FfiConverterOptionTypeRgbBitcoinAuthorization.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: GatewaySigningIntent, into buf: inout [UInt8]) {
+        FfiConverterTypeSigningIntent.write(value.intent, into: &buf)
+        FfiConverterUInt32.write(value.maxBlockHeight, into: &buf)
+        FfiConverterUInt64.write(value.targetFeeRateMsatPerVbyte, into: &buf)
+        FfiConverterOptionTypeCreateUtxosAuthorization.write(value.createUtxos, into: &buf)
+        FfiConverterOptionTypeRgbBitcoinAuthorization.write(value.rgb, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeGatewaySigningIntent_lift(_ buf: RustBuffer) throws -> GatewaySigningIntent {
+    return try FfiConverterTypeGatewaySigningIntent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeGatewaySigningIntent_lower(_ value: GatewaySigningIntent) -> RustBuffer {
+    return FfiConverterTypeGatewaySigningIntent.lower(value)
 }
 
 
@@ -1122,6 +1495,206 @@ package func FfiConverterTypeRecipient_lift(_ buf: RustBuffer) throws -> Recipie
 #endif
 package func FfiConverterTypeRecipient_lower(_ value: Recipient) -> RustBuffer {
     return FfiConverterTypeRecipient.lower(value)
+}
+
+
+/**
+ * Bitcoin authorization and immutable caller context for a fungible RGB
+ * send. This deliberately does not claim RGB transition/consignment validity.
+ * The gateway remains trusted for RGB state and transition correctness.
+ */
+package struct RgbBitcoinAuthorization: Equatable, Hashable {
+    package var invoice: String
+    package var assetId: String
+    package var amount: UInt64
+    package var witnessAmountSats: UInt64?
+    package var witnessBlinding: UInt64?
+    package var donation: Bool
+    package var minConfirmations: UInt32
+    package var skipSync: Bool
+    package var validationTimeUnixSeconds: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(invoice: String, assetId: String, amount: UInt64, witnessAmountSats: UInt64?, witnessBlinding: UInt64?, donation: Bool, minConfirmations: UInt32, skipSync: Bool, validationTimeUnixSeconds: UInt64) {
+        self.invoice = invoice
+        self.assetId = assetId
+        self.amount = amount
+        self.witnessAmountSats = witnessAmountSats
+        self.witnessBlinding = witnessBlinding
+        self.donation = donation
+        self.minConfirmations = minConfirmations
+        self.skipSync = skipSync
+        self.validationTimeUnixSeconds = validationTimeUnixSeconds
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RgbBitcoinAuthorization: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbBitcoinAuthorization: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbBitcoinAuthorization {
+        return
+            try RgbBitcoinAuthorization(
+                invoice: FfiConverterString.read(from: &buf), 
+                assetId: FfiConverterString.read(from: &buf), 
+                amount: FfiConverterUInt64.read(from: &buf), 
+                witnessAmountSats: FfiConverterOptionUInt64.read(from: &buf), 
+                witnessBlinding: FfiConverterOptionUInt64.read(from: &buf), 
+                donation: FfiConverterBool.read(from: &buf), 
+                minConfirmations: FfiConverterUInt32.read(from: &buf), 
+                skipSync: FfiConverterBool.read(from: &buf), 
+                validationTimeUnixSeconds: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: RgbBitcoinAuthorization, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.invoice, into: &buf)
+        FfiConverterString.write(value.assetId, into: &buf)
+        FfiConverterUInt64.write(value.amount, into: &buf)
+        FfiConverterOptionUInt64.write(value.witnessAmountSats, into: &buf)
+        FfiConverterOptionUInt64.write(value.witnessBlinding, into: &buf)
+        FfiConverterBool.write(value.donation, into: &buf)
+        FfiConverterUInt32.write(value.minConfirmations, into: &buf)
+        FfiConverterBool.write(value.skipSync, into: &buf)
+        FfiConverterUInt64.write(value.validationTimeUnixSeconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbBitcoinAuthorization_lift(_ buf: RustBuffer) throws -> RgbBitcoinAuthorization {
+    return try FfiConverterTypeRgbBitcoinAuthorization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbBitcoinAuthorization_lower(_ value: RgbBitcoinAuthorization) -> RustBuffer {
+    return FfiConverterTypeRgbBitcoinAuthorization.lower(value)
+}
+
+
+/**
+ * Assignment requested by an RGB invoice. `amount` is present only for
+ * fungible and inflation-right assignments and retains the complete `u64`
+ * domain without crossing a floating-point boundary.
+ */
+package struct RgbInvoiceAssignment: Equatable, Hashable {
+    package var kind: RgbInvoiceAssignmentKind
+    package var amount: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(kind: RgbInvoiceAssignmentKind, amount: UInt64?) {
+        self.kind = kind
+        self.amount = amount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RgbInvoiceAssignment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceAssignment: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceAssignment {
+        return
+            try RgbInvoiceAssignment(
+                kind: FfiConverterTypeRgbInvoiceAssignmentKind.read(from: &buf), 
+                amount: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: RgbInvoiceAssignment, into buf: inout [UInt8]) {
+        FfiConverterTypeRgbInvoiceAssignmentKind.write(value.kind, into: &buf)
+        FfiConverterOptionUInt64.write(value.amount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceAssignment_lift(_ buf: RustBuffer) throws -> RgbInvoiceAssignment {
+    return try FfiConverterTypeRgbInvoiceAssignment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceAssignment_lower(_ value: RgbInvoiceAssignment) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceAssignment.lower(value)
+}
+
+
+package struct RgbInvoiceEncodedState: Equatable, Hashable {
+    package var kind: RgbInvoiceEncodedStateKind
+    package var amount: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    package init(kind: RgbInvoiceEncodedStateKind, amount: UInt64?) {
+        self.kind = kind
+        self.amount = amount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RgbInvoiceEncodedState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceEncodedState: FfiConverterRustBuffer {
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceEncodedState {
+        return
+            try RgbInvoiceEncodedState(
+                kind: FfiConverterTypeRgbInvoiceEncodedStateKind.read(from: &buf), 
+                amount: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    package static func write(_ value: RgbInvoiceEncodedState, into buf: inout [UInt8]) {
+        FfiConverterTypeRgbInvoiceEncodedStateKind.write(value.kind, into: &buf)
+        FfiConverterOptionUInt64.write(value.amount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncodedState_lift(_ buf: RustBuffer) throws -> RgbInvoiceEncodedState {
+    return try FfiConverterTypeRgbInvoiceEncodedState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncodedState_lower(_ value: RgbInvoiceEncodedState) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceEncodedState.lower(value)
 }
 
 
@@ -1920,6 +2493,243 @@ package func FfiConverterTypeRbfPolicy_lower(_ value: RbfPolicy) -> RustBuffer {
 
 
 /**
+ * RN-compatible assignment categories returned by RGB invoice decoding.
+ */
+
+package enum RgbInvoiceAssignmentKind: Equatable, Hashable {
+    
+    case fungible
+    case nonFungible
+    case inflationRight
+    case any
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RgbInvoiceAssignmentKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceAssignmentKind: FfiConverterRustBuffer {
+    typealias SwiftType = RgbInvoiceAssignmentKind
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceAssignmentKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .fungible
+        
+        case 2: return .nonFungible
+        
+        case 3: return .inflationRight
+        
+        case 4: return .any
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    package static func write(_ value: RgbInvoiceAssignmentKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .fungible:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .nonFungible:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .inflationRight:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .any:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceAssignmentKind_lift(_ buf: RustBuffer) throws -> RgbInvoiceAssignmentKind {
+    return try FfiConverterTypeRgbInvoiceAssignmentKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceAssignmentKind_lower(_ value: RgbInvoiceAssignmentKind) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceAssignmentKind.lower(value)
+}
+
+
+
+/**
+ * The assignment state literally encoded in the invoice path, before the
+ * RGB-lib compatibility projection into [`RgbInvoiceAssignment`].
+ *
+ * This evidence is required when validating a receive response: for example,
+ * an omitted state under a known NIA schema projects to `Fungible(0)`, while
+ * an explicit amount with no schema and no assignment name projects to `Any`.
+ */
+
+package enum RgbInvoiceEncodedStateKind: Equatable, Hashable {
+    
+    case omitted
+    case amount
+    case nonFungible
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RgbInvoiceEncodedStateKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceEncodedStateKind: FfiConverterRustBuffer {
+    typealias SwiftType = RgbInvoiceEncodedStateKind
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceEncodedStateKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .omitted
+        
+        case 2: return .amount
+        
+        case 3: return .nonFungible
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    package static func write(_ value: RgbInvoiceEncodedStateKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .omitted:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .amount:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .nonFungible:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncodedStateKind_lift(_ buf: RustBuffer) throws -> RgbInvoiceEncodedStateKind {
+    return try FfiConverterTypeRgbInvoiceEncodedStateKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncodedStateKind_lower(_ value: RgbInvoiceEncodedStateKind) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceEncodedStateKind.lower(value)
+}
+
+
+
+/**
+ * The beneficiary construction encoded by an RGB invoice.
+ *
+ * This is intentionally explicit so the mobile facades can verify that a
+ * gateway response for a blind or witness receive request returned the same
+ * recipient mode in the encoded invoice.
+ */
+
+package enum RgbInvoiceRecipientType: Equatable, Hashable {
+    
+    case blind
+    case witness
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RgbInvoiceRecipientType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceRecipientType: FfiConverterRustBuffer {
+    typealias SwiftType = RgbInvoiceRecipientType
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceRecipientType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .blind
+        
+        case 2: return .witness
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    package static func write(_ value: RgbInvoiceRecipientType, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .blind:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .witness:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceRecipientType_lift(_ buf: RustBuffer) throws -> RgbInvoiceRecipientType {
+    return try FfiConverterTypeRgbInvoiceRecipientType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceRecipientType_lower(_ value: RgbInvoiceRecipientType) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceRecipientType.lower(value)
+}
+
+
+
+/**
  * Stable failure categories crossing the native-language boundary.
  *
  * Messages are deliberately safe to surface. They never include key material,
@@ -1944,6 +2754,8 @@ enum SignerError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case KeyDerivation
     case SigningFailed
     case SignatureVerification
+    case InvalidRgbInvoice(reason: String
+    )
 
     
 
@@ -1991,6 +2803,9 @@ package struct FfiConverterTypeSignerError: FfiConverterRustBuffer {
         case 8: return .KeyDerivation
         case 9: return .SigningFailed
         case 10: return .SignatureVerification
+        case 11: return .InvalidRgbInvoice(
+            reason: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2046,6 +2861,11 @@ package struct FfiConverterTypeSignerError: FfiConverterRustBuffer {
         case .SignatureVerification:
             writeInt(&buf, Int32(10))
         
+        
+        case let .InvalidRgbInvoice(reason):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(reason, into: &buf)
+            
         }
     }
 }
@@ -2092,6 +2912,150 @@ fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeCreateUtxosAuthorization: FfiConverterRustBuffer {
+    typealias SwiftType = CreateUtxosAuthorization?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCreateUtxosAuthorization.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCreateUtxosAuthorization.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRgbBitcoinAuthorization: FfiConverterRustBuffer {
+    typealias SwiftType = RgbBitcoinAuthorization?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRgbBitcoinAuthorization.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRgbBitcoinAuthorization.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceTypeGatewayOwnedOutput: FfiConverterRustBuffer {
+    typealias SwiftType = [GatewayOwnedOutput]?
+
+    package static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypeGatewayOwnedOutput.write(value, into: &buf)
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypeGatewayOwnedOutput.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2109,6 +3073,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGatewayOwnedOutput: FfiConverterRustBuffer {
+    typealias SwiftType = [GatewayOwnedOutput]
+
+    package static func write(_ value: [GatewayOwnedOutput], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGatewayOwnedOutput.write(item, into: &buf)
+        }
+    }
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GatewayOwnedOutput] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GatewayOwnedOutput]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGatewayOwnedOutput.read(from: &buf))
         }
         return seq
     }
@@ -2241,6 +3230,27 @@ package func deriveSeedFromMnemonic(mnemonicUtf8: Data, passphraseUtf8: Data)thr
 })
 }
 /**
+ * Extracts bounded, untrusted colored-output hints from an unsigned create
+ * preparation. This does not prove wallet ownership, input safety, fees or
+ * authorization. The caller must bind the returned plan to its original
+ * request and run `validate_gateway_psbt` / `sign_gateway_psbt`, which derive
+ * every owned key and script independently, before accepting or signing it.
+ * Vanilla change is deliberately excluded from the returned plan.
+ *
+ * # Errors
+ * Returns a parsing or policy error for malformed, oversized or out-of-profile
+ * preparations. No seed material or network request is involved.
+ */
+package func extractGatewayCreateUtxosOutputs(psbtBase64: String, network: Network)throws  -> [GatewayOwnedOutput]  {
+    return try  FfiConverterSequenceTypeGatewayOwnedOutput.lift(try rustCallWithError(FfiConverterTypeSignerError_lift) {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_func_extract_gateway_create_utxos_outputs(
+        FfiConverterString.lower(psbtBase64),
+        FfiConverterTypeNetwork_lower(network),uniffiCallStatus
+    )
+})
+}
+/**
  * Generates a 12-word English BIP39 wallet and its RN-compatible key fields.
  *
  * # Errors
@@ -2291,12 +3301,64 @@ package func verifyMessage(messageUtf8: Data, signatureBase64: String, accountXp
 })
 }
 /**
+ * Decodes and strictly validates a canonical RGB invoice without requiring a
+ * wallet, seed, network call, or persistent state.
+ *
+ * This validates invoice syntax, identifiers, checksums, supported schema and
+ * assignment combinations, and bounded transport metadata. It does not prove
+ * that an asset exists, that the beneficiary is owned by the caller, or that a
+ * future RGB state transition is valid.
+ *
+ * # Errors
+ *
+ * Returns `InvalidRgbInvoice` for malformed, non-canonical, oversized, or
+ * unsupported invoices. Error messages never include invoice contents.
+ */
+package func decodeRgbInvoice(invoice: String)throws  -> DecodedRgbInvoice  {
+    return try  FfiConverterTypeDecodedRgbInvoice_lift(try rustCallWithError(FfiConverterTypeSignerError_lift) {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_func_decode_rgb_invoice(
+        FfiConverterString.lower(invoice),uniffiCallStatus
+    )
+})
+}
+/**
+ * Derives the exact Bitcoin recipient encoded by a canonical RGB witness
+ * invoice. This is local syntax/output authorization, not RGB validation.
+ *
+ * # Errors
+ * Rejects blind/malformed invoices, network mismatch and invalid/dust amounts.
+ */
+package func rgbInvoiceWitnessRecipient(invoice: String, network: Network, amountSats: UInt64)throws  -> Recipient  {
+    return try  FfiConverterTypeRecipient_lift(try rustCallWithError(FfiConverterTypeSignerError_lift) {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_func_rgb_invoice_witness_recipient(
+        FfiConverterString.lower(invoice),
+        FfiConverterTypeNetwork_lower(network),
+        FfiConverterUInt64.lower(amountSats),uniffiCallStatus
+    )
+})
+}
+/**
  * Returns the fail-closed baseline for a plain Bitcoin send.
  */
 package func defaultSigningPolicy() -> SigningPolicy  {
     return try!  FfiConverterTypeSigningPolicy_lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_utexo_local_signer_fn_func_default_signing_policy(uniffiCallStatus
+    )
+})
+}
+/**
+ * Baseline for the additive `utexo.psbt.rgb-lib.v1` profile. This policy is
+ * accepted only by `validate_gateway_psbt` / `sign_gateway_psbt`, which also
+ * require independent height, fee target and operation-specific context.
+ */
+package func gatewaySigningPolicy(operation: OperationKind) -> SigningPolicy  {
+    return try!  FfiConverterTypeSigningPolicy_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_utexo_local_signer_fn_func_gateway_signing_policy(
+        FfiConverterTypeOperationKind_lower(operation),uniffiCallStatus
     )
 })
 }
@@ -2328,6 +3390,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_utexo_local_signer_checksum_func_derive_seed_from_mnemonic() != 1632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_utexo_local_signer_checksum_func_extract_gateway_create_utxos_outputs() != 5246) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_utexo_local_signer_checksum_func_generate_keys() != 61253) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2337,7 +3402,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_utexo_local_signer_checksum_func_verify_message() != 13585) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_utexo_local_signer_checksum_func_decode_rgb_invoice() != 51285) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_utexo_local_signer_checksum_func_rgb_invoice_witness_recipient() != 54816) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_utexo_local_signer_checksum_func_default_signing_policy() != 24902) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_utexo_local_signer_checksum_func_gateway_signing_policy() != 12613) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_utexo_local_signer_checksum_method_localsigner_derive_address() != 53715) {
@@ -2346,10 +3420,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_utexo_local_signer_checksum_method_localsigner_identity() != 40060) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_utexo_local_signer_checksum_method_localsigner_sign_gateway_psbt() != 25826) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_utexo_local_signer_checksum_method_localsigner_sign_message() != 25670) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_utexo_local_signer_checksum_method_localsigner_sign_psbt() != 38560) {
+    if (uniffi_utexo_local_signer_checksum_method_localsigner_sign_psbt() != 29907) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_utexo_local_signer_checksum_method_localsigner_validate_gateway_psbt() != 9058) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_utexo_local_signer_checksum_method_localsigner_validate_psbt() != 46241) {

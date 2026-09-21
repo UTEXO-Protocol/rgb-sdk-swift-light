@@ -67,8 +67,9 @@ public struct BitcoinAddress: Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Opaque until the local RGB invoice parser is part of the audited native core.
-public struct RGBInvoice: Hashable, Sendable, CustomStringConvertible {
+/// Bounded transport value. `decodeRGBInvoice` performs local syntax/checksum
+/// validation; construction alone does not establish a valid or trusted invoice.
+public struct RGBInvoice: Hashable, Sendable, CustomStringConvertible, CustomReflectable {
     let storage: String
 
     public init(_ value: String) throws {
@@ -76,6 +77,10 @@ public struct RGBInvoice: Hashable, Sendable, CustomStringConvertible {
     }
 
     public var description: String { "RGBInvoice([REDACTED])" }
+    public var customMirror: Mirror { Mirror(self, children: ["value": "[REDACTED]"]) }
+
+    /// Explicit access for QR rendering or sharing. Treat invoices as private wallet data.
+    public var value: String { storage }
 
     @_spi(Backend)
     public var backendValue: String { storage }

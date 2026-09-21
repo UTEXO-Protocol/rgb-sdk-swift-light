@@ -2,6 +2,37 @@ import CryptoKit
 import Foundation
 
 enum RequestHasher {
+    static func createUtxos(network: Network, request: CreateUtxosRequest) throws -> RequestHash {
+        try digest([
+            "operation", "createUtxos", "network", network.rawValue,
+            "upTo", String(request.upTo), "num", request.num.map(String.init) ?? "null",
+            "sizeSats", request.size.map { String($0.value) } ?? "null",
+            "feeRateMsatPerVbyte", String(request.feeRate.milliSatsPerVByte),
+            "skipSync", String(request.skipSync),
+        ])
+    }
+
+    static func onchainSend(network: Network, request: OnchainSendRequest) throws -> RequestHash {
+        try digest([
+            "operation", "onchainSend", "network", network.rawValue,
+            "invoice", request.invoice.value, "assetId", request.assetID?.value ?? "null",
+            "amount", request.amount.decimal,
+            "witnessAmountSats", request.witnessData.map { String($0.amountSat.value) } ?? "null",
+            "witnessBlinding", request.witnessData?.blinding.map(String.init) ?? "null",
+            "donation", String(request.donation),
+            "feeRateMsatPerVbyte", String(request.feeRate.milliSatsPerVByte),
+            "minConfirmations", String(request.minConfirmations.rawValue),
+            "skipSync", String(request.skipSync),
+        ])
+    }
+
+    private static func digest(_ fields: [String]) throws -> RequestHash {
+        var encoder = CanonicalHashEncoder()
+        try encoder.append("utexo.wallet.operation-intent.v1")
+        for field in fields { try encoder.append(field) }
+        return RequestHash(trustedSHA256Hex: encoder.finalizeHex())
+    }
+
     static func sendBtc(network: Network, request: SendBtcRequest) throws -> RequestHash {
         var encoder = CanonicalHashEncoder()
         for value in [

@@ -1,31 +1,64 @@
-# Native signer artifact provenance
+# Native and facade artifact provenance
 
-The checked-in `UtexoLocalSigner.xcframework` was built from
-`utexo-local-signer` 0.1.0 with its locked dependency graph. The native source
-is maintained as the shared signer core alongside the Swift and Kotlin SDK
-repositories; it is not duplicated in this repository.
+Applications link the `RGBSDK` product from `Artifacts/RGBSDK.xcframework`.
+It contains the Swift facade, private UniFFI bindings and the Rust signer.
+The root package does not expose the private `UtexoLocalSignerFFI` or
+`UtexoLocalSignerBindings` modules. The separate raw native archive and generated
+sources remain in this repository for rebuilding and independent inspection.
 
-Build inputs for this snapshot:
+## Three distinct records
 
-- Rust 1.88.0 (`6b00bc3880198600130e1cf62b8f8a93494488cc`)
-- Cargo lockfile SHA-256:
-  `0a23166791ea9724859b48d72c97be16ea8699c3ef74c48004cde44a8be8fc3d`
-- Xcode 26.6 (`17F113`)
-- macOS deployment target 13.0
-- iOS deployment target 15.0
-- Cargo release profile with locked dependencies, thin LTO, one codegen unit,
-  and stripped symbols
-- Rust and C source paths remapped so build-machine paths are not embedded in
-  the distributed archives
+1. **Native binary build inputs.** `NativeSource/native-build.json` records exact
+   toolchain, Cargo lock/source inputs and produced native archives. The relevant
+   files are included in `NativeSource/SHA256SUMS`; do not infer a binary rebuild
+   from a later source archive or a passing source-only test run.
+2. **Source/assurance snapshot.** `NativeSource/utexo-local-signer-source.tar.gz`
+   packages the current Rust source, locked dependencies, tests and build scripts.
+   Its canonical checksum is in `NativeSource/SHA256SUMS`, not duplicated here.
+   Adding tests or tooling can change this snapshot without changing production
+   native code; such a change must not be relabeled as new binary provenance.
+3. **Complete Swift facade build.** `NativeSource/facade-build.json` records all
+   facade source files, generated bindings, complete raw native input tree,
+   build scripts, exact Xcode/Swift versions, and complete resulting framework
+   tree hashes. `Scripts/build-facade.sh` rejects input changes during a build.
+   `node Scripts/facade-provenance.mjs --check` rejects source/output drift and
+   never overwrites the evidence to make a check pass.
 
-SHA-256 checksums:
+This separation supersedes older prose that named a 2026-09-18 source archive
+and Cargo lock hash as if they described every later assurance snapshot.
+Canonical generated records, not hand-copied hashes in Markdown, identify the
+artifacts checked out by the consumer.
 
-```text
-96109cfd1b81e0db81334d5644a118cce9e5a80f76bf4d6f1a08670c611f66ca  Artifacts/UtexoLocalSigner.xcframework/ios-arm64/libutexo_local_signer.a
-1236c9bbe763a42299bfda4065fc325a3a5bf05eddce5878aeeaf5ba6b243e2d  Artifacts/UtexoLocalSigner.xcframework/ios-arm64_x86_64-simulator/libutexo_local_signer.a
-3b7d759b73ae07c07cbd0edbd87528e8d0a8d0d95236427c10bcb40748432829  Artifacts/UtexoLocalSigner.xcframework/macos-arm64_x86_64/libutexo_local_signer.a
+## Rebuild and verify
+
+The shared core is `utexo-local-signer` 0.1.0. Its source archive includes the
+locked Rust graph and the platform packaging scripts. Extract it into a fresh
+temporary directory and run `cargo test --locked` to audit the core independently.
+The platform packaging scripts use the documented three-directory workspace:
+`shared/utexo-local-signer`, `rgb-sdk-swift-light`, `rgb-sdk-kotlin-light`.
+
+After rebuilding/regenerating the shared native core, from this repository run:
+
+```sh
+bash Scripts/verify-source.sh
+bash Scripts/verify-source.sh --configuration release -Xswiftc -warnings-as-errors
+bash Scripts/build-facade.sh
+node Scripts/facade-provenance.mjs --check
+bash Scripts/verify-api-boundary.sh
+bash Scripts/verify-public-api.sh
+bash Scripts/verify-macos-consumers.sh
+bash Scripts/verify-apple-consumer.sh
+shasum -a 256 -c NativeSource/SHA256SUMS
 ```
 
-These checksums identify this source snapshot; they are not a signed release
-attestation. Do not publish a production release until the packaging and
-security gates in `README.md` and `SECURITY.md` are closed.
+The facade is compiled with Swift 6 strict concurrency, library evolution,
+optimization and whole-module optimization. It preserves iOS 15 and macOS 13
+deployment targets, and includes iOS arm64, simulator arm64/x86_64 and macOS
+arm64/x86_64. Only self-contained public textual interfaces are shipped; private
+compiler modules and C headers are not part of the facade distribution.
+
+`NativeSource/dependencies.json` is the Cargo source/build/test dependency
+inventory and license metadata, not proof of completed vulnerability or legal
+review. Local checksums and locally recorded build metadata are not signed
+release attestations or independently reproduced artifact evidence. Read the
+remaining deployment/security gates in `README.md`, `SECURITY.md` and `PRIVACY.md`.

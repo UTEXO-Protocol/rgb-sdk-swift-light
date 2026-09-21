@@ -20,6 +20,7 @@ public actor UTEXOWallet {
     private let keyProvider: any WalletKeyProvider
     private let operationCoordinator: OperationCoordinator
     private let signingEngineFactory: any LocalSigningEngineFactory
+    private var durableJournal: EncryptedOperationJournal?
 
     private var lifecycle: Lifecycle = .new
     private var session: BackendSession?
@@ -31,8 +32,63 @@ public actor UTEXOWallet {
     private var gateHeld = false
     private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
-    /// Infrastructure initializer. A future UTEXO backend transport package
-    /// will expose an application-level factory without exposing this SPI.
+    /// Opens local durable storage and builds the ordinary application facade.
+    /// Call `initialize()` and then `unlock()` using the usual wallet lifecycle.
+    /// A supplied key provider must load the same wallet identity on every unlock.
+    public static func create(
+        configuration: WalletConfiguration,
+        service: WalletServiceConfiguration,
+        storage: WalletStorageConfiguration,
+        keyProvider: (any WalletKeyProvider)? = nil
+    ) async throws -> UTEXOWallet {
+        try Task.checkCancellation()
+        let gatewayConfiguration = try GatewayBackendConfiguration(
+            baseURL: service.baseURL, apiKeyProvider: service.apiKeyProvider,
+            network: configuration.network,
+            allowInsecureLocalDevelopment: service.allowInsecureLocalDevelopment,
+            requestTimeout: service.requestTimeout
+        )
+        let provider = try keyProvider ?? KeychainSeedStore(
+            service: storage.keychainService, walletID: configuration.walletID,
+            accessPolicy: storage.seedAccessPolicy
+        )
+        let journal = try EncryptedOperationJournal(
+            configuration: configuration, serviceURL: service.baseURL, storage: storage
+        )
+        do {
+            try Task.checkCancellation()
+            let backend = GatewayWalletBackend(
+                configuration: gatewayConfiguration,
+                identityObserver: { try await journal.bindGatewayUserID($0) }
+            )
+            return UTEXOWallet(
+                configuration: configuration, backend: backend, keyProvider: provider,
+                durableJournal: journal
+            )
+        } catch {
+            await journal.close()
+            throw error
+        }
+    }
+
+    init(
+        configuration: WalletConfiguration,
+        backend: any WalletBackend,
+        keyProvider: any WalletKeyProvider,
+        durableJournal: EncryptedOperationJournal
+    ) {
+        self.configuration = configuration
+        self.backend = backend
+        self.keyProvider = keyProvider
+        self.durableJournal = durableJournal
+        signingEngineFactory = UniFFILocalSigningEngineFactory()
+        operationCoordinator = OperationCoordinator(
+            configuration: configuration, backend: backend, journal: durableJournal,
+            now: { try checkedUnixMilliseconds() / 1_000 }
+        )
+    }
+
+    /// Legacy infrastructure initializer; ordinary applications use `create`.
     @_spi(Backend)
     public init(
         configuration: WalletConfiguration,
@@ -48,7 +104,7 @@ public actor UTEXOWallet {
             configuration: configuration,
             backend: backend,
             journal: operationJournal,
-            now: { UInt64(Date().timeIntervalSince1970) }
+            now: { try checkedUnixMilliseconds() / 1_000 }
         )
     }
 
@@ -110,14 +166,19 @@ public actor UTEXOWallet {
         try await reinit(parameters)
     }
 
-    /// Stops the session but preserves durable wallet data and permits `reinit`.
+    /// Stops the session, releases the in-memory signer, preserves durable wallet
+    /// data and permits `reinit`. The app controls background/idle lock policy;
+    /// there is no automatic application lifecycle observer in this SDK.
+    /// Lifecycle operations serialize with in-flight wallet work. Shutdown is
+    /// not cancellation or rollback of a transaction already being submitted.
     public func shutdown() async throws {
         try await exclusive { try await shutdownLocked(dispose: false) }
     }
 
     /// Idempotently closes this instance. It does not delete wallet/backend data.
+    /// Local resources are closed even when the calling task has been cancelled.
     public func destroy() async throws {
-        try await exclusive { try await shutdownLocked(dispose: true) }
+        try await exclusive(honorCancellation: false) { try await shutdownLocked(dispose: true) }
     }
 
     /// RN compatibility alias.
@@ -145,9 +206,18 @@ public actor UTEXOWallet {
 
     public func estimateFeeRate(blocks: BlockCount) async throws -> FeeEstimate {
         try await withUnlocked { context, _ in
-            try await backendCall {
+            // The RN native estimator accepts confirmation targets 1...1008.
+            // Reject invalid requests before any remote/indexer work occurs.
+            guard (1...1_008).contains(blocks.rawValue) else {
+                throw SDKError.invalidArgument("blocks", "must be between 1 and 1008")
+            }
+            let estimate = try await backendCall {
                 try await backend.estimateFeeRate(context: context, targetBlocks: blocks)
             }
+            guard estimate.targetBlocks == blocks else {
+                throw SDKError.backendProtocolMismatch("fee estimate changed the requested confirmation target")
+            }
+            return estimate
         }
     }
 
@@ -162,7 +232,9 @@ public actor UTEXOWallet {
         }
     }
 
-    /// RN-shaped convenience overload.
+    /// RN-shaped convenience overload. The default key creates a NEW logical payment
+    /// on every invocation. Persist an explicit key and original request before the
+    /// first call, and reuse both after cancellation, timeout, or process restart.
     public func sendBtc(
         address: BitcoinAddress,
         amount: Satoshis,
@@ -181,16 +253,16 @@ public actor UTEXOWallet {
         )
     }
 
-    /// Surface frozen now; signing remains disabled until an exact owned-output
-    /// plan is represented and enforced by the shared policy core.
+    /// The gateway must provide durable completion/recovery before its production
+    /// money-movement gate can be enabled. Output plans are derived from its PSBT
+    /// and independently validated against local keys before signing.
     public func createUtxos() async throws -> CreateUtxosResult {
         try await createUtxos(CreateUtxosRequest())
     }
 
     public func createUtxos(_ request: CreateUtxosRequest) async throws -> CreateUtxosResult {
-        try await withUnlocked { _, signer in
-            try requireLocalSigning(signer, operation: .createUtxos)
-            throw SDKError.unsupported("createUtxos backend signing contract")
+        try await withUnlocked { context, signer in
+            return try await operationCoordinator.createUtxos(backendContext: context, signer: signer, request: request)
         }
     }
 
@@ -229,23 +301,17 @@ public actor UTEXOWallet {
     }
 
     public func blindReceive(_ request: InvoiceRequest) async throws -> InvoiceReceiveData {
-        try await withUnlocked { _, signer in
-            try requireLocalRGBInvoiceParsing(signer)
-            throw SDKError.unsupported("local RGB invoice parsing")
-        }
+        try await receiveInvoice(request, witness: false)
     }
 
     public func witnessReceive(_ request: InvoiceRequest) async throws -> InvoiceReceiveData {
-        try await withUnlocked { _, signer in
-            try requireLocalRGBInvoiceParsing(signer)
-            throw SDKError.unsupported("local RGB invoice parsing")
-        }
+        try await receiveInvoice(request, witness: true)
     }
 
     public func decodeRGBInvoice(_ invoice: RGBInvoice) async throws -> InvoiceData {
         try await withUnlocked { _, signer in
             try requireLocalRGBInvoiceParsing(signer)
-            throw SDKError.unsupported("local RGB invoice parsing")
+            return try decodeRGBInvoiceLocally(invoice)
         }
     }
 
@@ -254,18 +320,61 @@ public actor UTEXOWallet {
     }
 
     public func onchainReceive(_ request: OnchainReceiveRequest) async throws -> OnchainReceiveResponse {
-        try await withUnlocked { _, signer in
+        try await withUnlocked { context, signer in
             try requireLocalRGBInvoiceParsing(signer)
-            throw SDKError.unsupported("local RGB invoice parsing")
+            let startedAt = try checkedUnixMilliseconds() / 1_000
+            let response = try await backendCall {
+                try await backend.onchainReceive(context: context, request: request)
+            }
+            try Task.checkCancellation()
+            let completedAt = try checkedUnixMilliseconds() / 1_000
+            // Validate even injected SPI adapters: an invoice method returning
+            // a typed DTO does not establish that it represents this request.
+            try validateReceivedRGBInvoice(
+                response, request: request, network: configuration.network,
+                startedAt: startedAt, completedAt: completedAt,
+                duration: request.duration?.value ?? 86_400
+            )
+            return response
+        }
+    }
+
+    private func receiveInvoice(_ request: InvoiceRequest, witness: Bool) async throws -> InvoiceReceiveData {
+        try await withUnlocked { context, signer in
+            try requireLocalRGBInvoiceParsing(signer)
+            let startedAt = try checkedUnixMilliseconds() / 1_000
+            // The current gateway SPI defaults reject these routes because its
+            // response lacks the required batch index. A backend implementing
+            // the complete contract must still pass the same local validation.
+            let received = try await backendCall {
+                if witness { return try await backend.witnessReceive(context: context, request: request) }
+                return try await backend.blindReceive(context: context, request: request)
+            }
+            try Task.checkCancellation()
+            let completedAt = try checkedUnixMilliseconds() / 1_000
+            let intent = try OnchainReceiveRequest(
+                amount: request.amount, assetID: request.assetID,
+                minConfirmations: request.minConfirmations, duration: request.duration, witness: witness
+            )
+            try validateReceivedRGBInvoice(
+                OnchainReceiveResponse(
+                    invoice: received.invoice, recipientID: received.recipientID,
+                    expirationTimestamp: received.expirationTimestamp,
+                    batchTransferIndex: received.batchTransferIndex
+                ),
+                request: intent, network: configuration.network,
+                startedAt: startedAt, completedAt: completedAt,
+                duration: request.duration?.value ?? 86_400
+            )
+            return received
         }
     }
 
     /// Surface frozen now; disabled until backend evidence can be bound to the
     /// caller's RGB intent and the server-trust boundary is explicitly versioned.
     public func onchainSend(_ request: OnchainSendRequest) async throws -> OnchainSendResponse {
-        try await withUnlocked { _, signer in
-            try requireLocalSigning(signer, operation: .onchainSend)
-            throw SDKError.unsupported("onchainSend backend signing contract")
+        try await withUnlocked { context, signer in
+            return try await operationCoordinator.onchainSend(backendContext: context, signer: signer, request: request)
         }
     }
 
@@ -419,6 +528,7 @@ public actor UTEXOWallet {
         try validateCapabilities(candidate.capabilities)
         let identity = try candidate.identity()
         try validateIdentity(identity)
+        try await durableJournal?.bindSignerIdentity(identity)
         try await backendCall {
             try await backend.registerWallet(
                 .init(
@@ -443,6 +553,9 @@ public actor UTEXOWallet {
         let activeSession = session
         session = nil
         lifecycle = dispose ? .disposed : .shutdown
+        // Release only on permanent disposal. `shutdown` retains exclusive ownership
+        // because this instance may be reinitialized. Close even if backend close fails.
+        if dispose { await durableJournal?.close() }
         if let activeSession {
             try await backendCall { try await backend.shutdown(session: activeSession) }
         }
@@ -531,13 +644,16 @@ public actor UTEXOWallet {
         }
     }
 
-    private func exclusive<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+    private func exclusive<T: Sendable>(
+        honorCancellation: Bool = true,
+        _ body: () async throws -> T
+    ) async throws -> T {
         await acquireGate()
         defer { releaseGate() }
         // A cancelled task may have spent time queued behind a signing or
         // lifecycle workflow. It must never execute the body after receiving
         // the FIFO token.
-        try Task.checkCancellation()
+        if honorCancellation { try Task.checkCancellation() }
         return try await body()
     }
 }

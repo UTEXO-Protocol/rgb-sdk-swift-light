@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Swift, Foundation, and FFI runtimes may make opaque copies, so this type
 /// must not be interpreted as a hard zeroization guarantee.
-public final class SecretSeed: @unchecked Sendable, CustomStringConvertible {
+public final class SecretSeed: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     public static let byteCount = 64
 
     private let lock = NSLock()
@@ -38,10 +38,11 @@ public final class SecretSeed: @unchecked Sendable, CustomStringConvertible {
     }
 
     public var description: String { "SecretSeed([REDACTED])" }
+    public var customMirror: Mirror { Mirror(self, children: ["value": "[REDACTED]"]) }
 }
 
 /// Unlock input consumed only by the local key provider.
-public final class WalletUnlockParameters: @unchecked Sendable, CustomStringConvertible {
+public final class WalletUnlockParameters: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     private let lock = NSLock()
     private var passwordUTF8: [UInt8]?
     private var closed = false
@@ -92,6 +93,7 @@ public final class WalletUnlockParameters: @unchecked Sendable, CustomStringConv
     }
 
     public var description: String { "WalletUnlockParameters(password=[REDACTED])" }
+    public var customMirror: Mirror { Mirror(self, children: ["password": "[REDACTED]"]) }
 }
 
 /// Loads protected seed material only for the duration of `unlock`.
@@ -100,7 +102,7 @@ public protocol WalletKeyProvider: Sendable {
 }
 
 /// Redacting, one-shot recovery phrase returned during wallet creation.
-public final class RecoveryPhrase: @unchecked Sendable, CustomStringConvertible {
+public final class RecoveryPhrase: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     private let lock = NSLock()
     private var utf8: [UInt8]?
 
@@ -151,10 +153,11 @@ public final class RecoveryPhrase: @unchecked Sendable, CustomStringConvertible 
     }
 
     public var description: String { "RecoveryPhrase([REDACTED])" }
+    public var customMirror: Mirror { Mirror(self, children: ["value": "[REDACTED]"]) }
 }
 
 /// Explicitly dangerous compatibility export; never log or serialize it.
-public final class ExtendedPrivateKey: @unchecked Sendable, CustomStringConvertible {
+public final class ExtendedPrivateKey: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     private let lock = NSLock()
     private var utf8: [UInt8]?
 
@@ -204,6 +207,7 @@ public final class ExtendedPrivateKey: @unchecked Sendable, CustomStringConverti
     }
 
     public var description: String { "ExtendedPrivateKey([REDACTED])" }
+    public var customMirror: Mirror { Mirror(self, children: ["value": "[REDACTED]"]) }
 }
 
 public typealias SecretMnemonic = RecoveryPhrase

@@ -1,0 +1,71 @@
+name: Swift SDK checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-sdk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundled-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify committed source and binary checksums
+        run: sha256sum -c NativeSource/SHA256SUMS
+      - name: Install pinned Rust verification toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+      - name: Verify the source archive shipped to SDK consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_dir="$(mktemp -d)"
+          tar -xzf NativeSource/utexo-local-signer-source.tar.gz -C "$audit_dir"
+          cd "$audit_dir"
+          cargo fetch --locked
+          bash scripts/verify.sh
+          node --test examples/core-consensus-cleanup.test.mjs
+          docker pull registry.gitlab.com/hashbeam/docker/bitcoind@sha256:5473c951ca8a703f7c15d9a353f99135e0a1f0cc7ef976f29d073160950098bf
+          node examples/verify-core-consensus.mjs
+          node --test scripts/osv-response.test.mjs
+          node scripts/security-inventory.mjs --check --advisories
+  swift:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Native provenance checksums
+        run: shasum -a 256 -c NativeSource/SHA256SUMS
+      - name: Verify selected Apple toolchain
+        run: |
+          test "$(xcodebuild -version)" = $'Xcode 27.0\nBuild version 27A266a'
+          swift --version
+      - name: Unit and crash-recovery tests
+        run: |
+          bash Scripts/verify-source.sh
+          bash Scripts/verify-source.sh --configuration release -Xswiftc -warnings-as-errors
+      - name: Verify committed facade matches source and native inputs
+        run: node Scripts/facade-provenance.mjs --check
+      - name: iOS archived consumer, privacy resources and simulator linking
+        run: bash Scripts/verify-apple-consumer.sh
+      - name: Public source compatibility
+        run: bash Scripts/verify-public-api.sh
+      - name: Ordinary external consumer and strict release native boundary
+        run: bash Scripts/verify-api-boundary.sh
+      - name: Both macOS architecture consumers
+        run: bash Scripts/verify-macos-consumers.sh

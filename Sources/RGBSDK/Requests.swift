@@ -38,10 +38,17 @@ public struct CreateUtxosRequest: Hashable, Sendable {
         skipSync: Bool = false,
         idempotencyKey: IdempotencyKey = .random()
     ) throws {
-        if let num, !(1...256).contains(num) {
-            throw SDKError.invalidArgument("num", "must be between 1 and 256")
+        // The native RN reference accepts a u8 count. Keep the public UInt16
+        // carrier source-compatible, but reject values that would wrap at FFI.
+        if let num, !(1...255).contains(num) {
+            throw SDKError.invalidArgument("num", "must be between 1 and 255")
         }
-        if let size { _ = try Satoshis.positive(size, field: "size") }
+        if let size {
+            _ = try Satoshis.positive(size, field: "size")
+            guard size.value <= UInt64(UInt32.max) else {
+                throw SDKError.invalidArgument("size", "must fit the native unsigned 32-bit satoshi amount")
+            }
+        }
         self.upTo = upTo
         self.num = num
         self.size = size
@@ -139,11 +146,10 @@ public struct OnchainReceiveResponse: Hashable, Sendable {
         expirationTimestamp: UnixSeconds? = nil,
         batchTransferIndex: UInt64? = nil
     ) throws {
-        if let recipientID {
-            _ = try requireBoundedText(recipientID, field: "recipientId", maximumUTF8Bytes: 1_024)
-        }
         self.invoice = invoice
-        self.recipientID = recipientID
+        self.recipientID = try recipientID.map {
+            try requireBoundedText($0, field: "recipientId", maximumUTF8Bytes: 1_024)
+        }
         self.expirationTimestamp = expirationTimestamp
         self.batchTransferIndex = batchTransferIndex
     }
@@ -298,7 +304,10 @@ public struct FailTransfersResult: Hashable, Sendable {
 }
 
 public struct SyncResult: Hashable, Sendable {
+    /// Client-observed successful completion time, using the local wall clock.
+    /// Not a server timestamp, block timestamp, or proof of chain freshness.
     public let completedAt: UnixSeconds
+    /// Authoritative synchronized tip, only when the implementation can supply it.
     public let tipHeight: UInt32?
     public init(completedAt: UnixSeconds, tipHeight: UInt32? = nil) {
         self.completedAt = completedAt

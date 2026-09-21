@@ -3,6 +3,72 @@ import Security
 import Testing
 @testable @_spi(Backend) import RGBSDK
 
+@Test func createUtxoCountMatchesNativeU8DomainWithoutWrapping() throws {
+    #expect(try CreateUtxosRequest().num == nil)
+    #expect(try CreateUtxosRequest(num: 1).num == 1)
+    #expect(try CreateUtxosRequest(num: 255).num == 255)
+    for count: UInt16 in [0, 256, .max] {
+        #expect(throws: SDKError.self) { try CreateUtxosRequest(num: count) }
+    }
+    #expect(try CreateUtxosRequest(size: Satoshis(UInt64(UInt32.max))).size?.value == UInt64(UInt32.max))
+    #expect(throws: SDKError.self) { try CreateUtxosRequest(size: Satoshis(UInt64(UInt32.max) + 1)) }
+    #expect(throws: SDKError.self) { try CreateUtxosRequest(size: .zero) }
+}
+
+@Test func feeRateLiteralsAndTypedOverloadsAreUnambiguousAndChecked() throws {
+    #expect(FeeRate.default.milliSatsPerVByte == 2_000)
+    #expect(try CreateUtxosRequest().feeRate == FeeRate.default)
+    #expect(try SendBtcRequest(address: BitcoinAddress("bcrt1ptestaddress"), amount: Satoshis(1)).feeRate == FeeRate.default)
+    #expect(try FeeRate(satsPerVByte: 3).milliSatsPerVByte == 3_000)
+    #expect(try FeeRate(satsPerVByte: 1.5).milliSatsPerVByte == 1_500)
+    #expect(try FeeRate(satsPerVByte: Decimal(string: "1.001")!).milliSatsPerVByte == 1_001)
+    #expect(try FeeRate(satsPerVByte: Double(3)).milliSatsPerVByte == 3_000)
+    #expect(try FeeRate(satsPerVByte: 10_000) == FeeRate.maximumSupported)
+    for value in [Int.min, -1, 0, 10_001, Int.max] {
+        #expect(throws: SDKError.self) { try FeeRate(satsPerVByte: value) }
+    }
+}
+
+@Test func assetIFASuppliesCannotExceedDeclaredMaximum() throws {
+    #expect(throws: SDKError.self) {
+        try AssetIFA(
+            assetID: AssetID("rgb:asset"), ticker: "TEST", name: "Test", precision: 0,
+            initialSupply: AssetAmount(101), maximumSupply: AssetAmount(100),
+            knownCirculatingSupply: AssetAmount(100), timestamp: .init(rawValue: 1),
+            addedAt: .init(rawValue: 1), balance: AssetBalance()
+        )
+    }
+    #expect(throws: SDKError.self) {
+        try AssetIFA(
+            assetID: AssetID("rgb:asset"), ticker: "TEST", name: "Test", precision: 0,
+            initialSupply: AssetAmount(100), maximumSupply: AssetAmount(100),
+            knownCirculatingSupply: AssetAmount(101), timestamp: .init(rawValue: 1),
+            addedAt: .init(rawValue: 1), balance: AssetBalance()
+        )
+    }
+}
+
+@Test func invoiceExplicitValueIsAvailableWhileDescriptionRemainsRedacted() throws {
+    let invoice = try RGBInvoice("rgb:private-recipient")
+    #expect(invoice.value == "rgb:private-recipient")
+    #expect(!invoice.description.contains("private-recipient"))
+    let received = try OnchainReceiveResponse(invoice: invoice, recipientID: "  recipient  ")
+    #expect(received.recipientID == "recipient")
+}
+
+@Test func apiKeyIsBoundedRedactedAndCannotBeUsedAfterClose() throws {
+    for bytes in [[], [UInt8(10)], Array("injected\r\nheader".utf8), Array(repeating: UInt8(65), count: 513)] {
+        #expect(throws: SDKError.self) { try WalletAPIKey(copyingUTF8: bytes) }
+    }
+    let key = try WalletAPIKey(copyingUTF8: Array("private-credential".utf8))
+    #expect(!String(describing: key).contains("private-credential"))
+    #expect(!String(reflecting: key).contains("private-credential"))
+    #expect(!key.customMirror.children.contains { String(describing: $0.value).contains("private-credential") })
+    key.close()
+    key.close()
+    #expect(throws: SDKError.self) { try key.withBytes { $0.count } }
+}
+
 @Test func sendBtcRequestHashMatchesCrossPlatformGolden() throws {
     let request = try SendBtcRequest(
         address: BitcoinAddress(
@@ -18,6 +84,26 @@ import Testing
         try RequestHasher.sendBtc(network: .signet, request: request).hex
             == "67ed2e4db80d3acd337d567eaf6bdacbcce196d9c9fe280816210751be3c6ba7"
     )
+}
+
+@Test func createAndRgbRequestHashesBindEveryOptionAcrossPlatforms() throws {
+    let create = try CreateUtxosRequest(upTo: false, num: 5, size: Satoshis(5_000), feeRate: FeeRate(satsPerVByte: 2))
+    #expect(try RequestHasher.createUtxos(network: .regtest, request: create).hex
+        == "86f5dafa3faaacf0e084c64afde25b1fc907cd8933f96e1e9adcb28706424379")
+    let rgb = try OnchainSendRequest(
+        invoice: RGBInvoice("rgb:hash-fixture"), amount: AssetAmount(40), assetID: AssetID("rgb:asset"),
+        witnessData: WitnessData(amountSat: Satoshis(1_000), blinding: 17), donation: true,
+        feeRate: FeeRate(satsPerVByte: 2), minConfirmations: .init(rawValue: 2), skipSync: true
+    )
+    #expect(try RequestHasher.onchainSend(network: .regtest, request: rgb).hex
+        == "d5ddecdf034f493b7e8d95b0167cd3ea34654c73bb298f36787e4d56bc9fabcc")
+    let noBlinding = try OnchainSendRequest(
+        invoice: rgb.invoice, amount: rgb.amount, assetID: rgb.assetID,
+        witnessData: WitnessData(amountSat: Satoshis(1_000)), donation: true,
+        feeRate: rgb.feeRate, minConfirmations: rgb.minConfirmations, skipSync: true
+    )
+    #expect(try RequestHasher.onchainSend(network: .regtest, request: noBlinding)
+        != RequestHasher.onchainSend(network: .regtest, request: rgb))
 }
 
 @Test func identifiersRejectUnicodeAndWhitespace() throws {
@@ -51,6 +137,8 @@ import Testing
 
     let xpriv = try SecretExtendedPrivateKey(copyingUTF8: Array("tprv-secret".utf8))
     #expect(String(describing: xpriv) == "ExtendedPrivateKey([REDACTED])")
+    #expect(phrase.customMirror.children.allSatisfy { String(describing: $0.value) == "[REDACTED]" })
+    #expect(xpriv.customMirror.children.allSatisfy { String(describing: $0.value) == "[REDACTED]" })
 
     phrase.close()
     phrase.close()
@@ -137,4 +225,20 @@ import Testing
     )
     #expect(query[kSecAttrSynchronizable] as? Bool == false)
     #expect(query[kSecUseDataProtectionKeychain] as? Bool == true)
+}
+
+@Test func seedReadUsesInstalledACLAndDoesNotPretendToChangeProvisioningPolicy() {
+    let query = KeychainQueryBuilder.seedRead(service: "com.utexo.tests", account: "wallet")
+    #expect(query[kSecAttrAccessControl] == nil)
+    #expect(query[kSecAttrAccessible] == nil)
+    #expect(query[kSecReturnData] as? Bool == true)
+    #expect(query[kSecAttrSynchronizable] as? Bool == false)
+}
+
+@Test func localClockConversionRejectsInvalidFloatingPointValuesWithoutTrapping() throws {
+    #expect(try checkedUnixMilliseconds(1_234.567) == 1_234_567)
+    #expect(try checkedUnixMilliseconds(0) == 0)
+    for value in [-1.0, .nan, .infinity, -.infinity, Double.greatestFiniteMagnitude] {
+        #expect(throws: SDKError.self) { try checkedUnixMilliseconds(value) }
+    }
 }

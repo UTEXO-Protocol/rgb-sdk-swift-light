@@ -27,7 +27,9 @@ public struct Satoshis: Hashable, Comparable, Sendable, CustomStringConvertible 
 
 /// Exact fee rate stored as milli-satoshis per virtual byte.
 public struct FeeRate: Hashable, Comparable, Sendable, CustomStringConvertible {
-    public static let `default` = FeeRate(uncheckedMilliSatsPerVByte: 1_500)
+    /// The lightweight gateway accepts whole sat/vB values. Explicit fractional
+    /// rates remain exact values, but are rejected by that transport, not rounded.
+    public static let `default` = FeeRate(uncheckedMilliSatsPerVByte: 2_000)
     public static let maximumSupported = FeeRate(uncheckedMilliSatsPerVByte: 10_000_000)
 
     public let milliSatsPerVByte: UInt64
@@ -66,6 +68,16 @@ public struct FeeRate: Hashable, Comparable, Sendable, CustomStringConvertible {
             throw SDKError.invalidArgument("feeRate", "must be finite")
         }
         try self.init(satsPerVByte: Decimal(satsPerVByte))
+    }
+
+    /// Preserves the natural `FeeRate(satsPerVByte: 2)` spelling without an
+    /// ambiguous choice between Decimal and Double. Integer conversion is
+    /// checked before multiplication; negative or oversized inputs never trap.
+    public init(satsPerVByte: Int) throws {
+        guard satsPerVByte > 0, satsPerVByte <= 10_000 else {
+            throw SDKError.invalidArgument("feeRate", "must be between 1 and 10000 sat/vB")
+        }
+        try self.init(milliSatsPerVByte: UInt64(satsPerVByte) * 1_000)
     }
 
     init(uncheckedMilliSatsPerVByte: UInt64) {
@@ -132,4 +144,16 @@ public struct DurationSeconds: Hashable, Sendable {
 public struct UnixSeconds: RawRepresentable, Hashable, Sendable {
     public let rawValue: UInt64
     public init(rawValue: UInt64) { self.rawValue = rawValue }
+}
+
+/// Validate before floating-point-to-integer conversion, which otherwise traps
+/// for a pre-epoch/nonfinite/overflowing device clock. Use the cross-platform
+/// exact-millisecond domain also accepted by the gateway's JSON contract.
+func checkedUnixMilliseconds(_ seconds: TimeInterval = Date().timeIntervalSince1970) throws -> UInt64 {
+    let milliseconds = seconds * 1_000
+    guard milliseconds.isFinite, milliseconds >= 0,
+          milliseconds <= 9_007_199_254_740_991 else {
+        throw SDKError.invalidState(operation: "read local clock", state: "outside supported Unix time range")
+    }
+    return UInt64(milliseconds.rounded(.down))
 }

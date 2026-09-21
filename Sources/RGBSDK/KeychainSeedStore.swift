@@ -1,7 +1,9 @@
 import Foundation
 import Security
 
-/// Optional access-control requirement for seed retrieval.
+/// Access-control policy installed when a new seed item is created.
+/// Reopening an existing item with a different value does not change its ACL.
+/// Access control protects retrieval, not each signature in an unlocked session.
 public enum KeychainAccessPolicy: Sendable, Equatable {
     case whenUnlocked
     case userPresence
@@ -13,6 +15,8 @@ public enum KeychainAccessPolicy: Sendable, Equatable {
 /// The item is device-bound, never synchronizes to iCloud Keychain, and is not
 /// a Secure Enclave secp256k1 key. Biometric/passcode policy protects retrieval
 /// of the seed bytes; BIP32 and secp256k1 operations happen in process memory.
+/// `accessPolicy` is creation-only. This type does not silently migrate the
+/// protection of an existing item. Reuse the policy used during provisioning.
 public actor KeychainSeedStore: WalletKeyProvider {
     private let service: String
     private let account: String
@@ -24,9 +28,10 @@ public actor KeychainSeedStore: WalletKeyProvider {
         self.accessPolicy = accessPolicy
     }
 
-    /// Creates a new item. Existing key material is never overwritten.
+    /// Creates a new item with this store's access policy. Existing key material
+    /// and installed access control are never overwritten or upgraded.
     public func storeNew(seed: SecretSeed) throws {
-        guard !markerExists() else {
+        guard try !markerExists() else {
             throw SDKError.invalidState(
                 operation: "store seed",
                 state: "already provisioned or invalidated; delete or restore explicitly"
@@ -95,7 +100,7 @@ public actor KeychainSeedStore: WalletKeyProvider {
             defer { wipe(&bytes) }
             return try SecretSeed(copying: bytes)
         case errSecItemNotFound:
-            throw markerExists() ? SDKError.keyMaterialInvalidated : SDKError.keyMaterialNotFound
+            throw try markerExists() ? SDKError.keyMaterialInvalidated : SDKError.keyMaterialNotFound
         case errSecAuthFailed, errSecUserCanceled:
             throw SDKError.keychainAuthenticationFailed
         default:
@@ -119,11 +124,14 @@ public actor KeychainSeedStore: WalletKeyProvider {
         }
     }
 
-    private func markerExists() -> Bool {
-        SecItemCopyMatching(
+    private func markerExists() throws -> Bool {
+        let status = SecItemCopyMatching(
             KeychainQueryBuilder.markerRead(service: service, account: account) as CFDictionary,
             nil
-        ) == errSecSuccess
+        )
+        if status == errSecItemNotFound { return false }
+        guard status == errSecSuccess else { throw SDKError.keychainUnavailable(status: status) }
+        return true
     }
 }
 

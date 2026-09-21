@@ -1,8 +1,313 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable @_spi(Backend) import RGBSDK
 
+@Test func gatewayReceiveMapsExactDefaultsAndValidatesLocalInvoice() async throws {
+    for witness in [false, true] {
+        let invoice = invoiceTestString(witness: witness)
+        let decoded = try decodeRGBInvoiceLocally(RGBInvoice(invoice))
+        let response = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "invoice": invoice, "recipientId": decoded.recipientID,
+            "expirationTimestamp": 87_400, "mode": witness ? "witness" : "blind",
+        ]), as: UTF8.self)
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#),
+            gatewayResponse(response, statusCode: 201),
+        ])
+        let (backend, context) = try await initializedGateway(transport: transport)
+        let result = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest(witness: witness))
+        #expect(result.invoice.value == invoice)
+        #expect(result.recipientID == decoded.recipientID)
+        #expect(result.expirationTimestamp?.rawValue == 87_400)
+        #expect(result.batchTransferIndex == nil)
+        let requests = await transport.snapshot()
+        #expect(requests.map(\.url.path) == ["/v1/me", "/v1/wallet/receive"])
+        let requestBody = try #require(requests.last?.body)
+        let body = try jsonObject(requestBody)
+        #expect(body["mode"] as? String == (witness ? "witness" : "blind"))
+        #expect(body["durationSeconds"] as? Int == 86_400)
+        #expect(body["minConfirmations"] as? Int == 0)
+        #expect(body["amount"] == nil && body["assetId"] == nil)
+    }
+}
+
+@Test func gatewayReceiveRejectsUnrepresentableRequestsBeforeHTTP() async throws {
+    let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#)])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    for request in [
+        try OnchainReceiveRequest(amount: AssetAmount(9_007_199_254_740_992)),
+        try OnchainReceiveRequest(duration: DurationSeconds(59)),
+        try OnchainReceiveRequest(duration: DurationSeconds(2_592_001)),
+        try OnchainReceiveRequest(minConfirmations: BlockCount(rawValue: 101)),
+    ] {
+        do { _ = try await backend.onchainReceive(context: context, request: request); Issue.record("expected local request rejection") }
+        catch let error as SDKError { #expect(error.code == .invalidArgument) }
+    }
+    #expect(await transport.snapshot().count == 1)
+}
+
+@Test func gatewayReceivePreservesExplicitAmountAssetDurationAndConfirmations() async throws {
+    let invoice = invoiceTestString(
+        asset: invoiceTestAsset, schema: invoiceTestNiaSchema, assignment: "BF", expiry: 1_060
+    )
+    let decoded = try decodeRGBInvoiceLocally(RGBInvoice(invoice))
+    let response = String(decoding: try JSONSerialization.data(withJSONObject: [
+        "invoice": invoice, "recipientId": decoded.recipientID,
+        "expirationTimestamp": 1_060, "mode": "blind",
+    ]), as: UTF8.self)
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#),
+        gatewayResponse(response, statusCode: 201),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let result = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest(
+        amount: AssetAmount(100), assetID: AssetID("rgb:\(invoiceTestAsset)"),
+        minConfirmations: BlockCount(rawValue: 100), duration: DurationSeconds(60), witness: false
+    ))
+    #expect(result.invoice.value == invoice)
+    let requests = await transport.snapshot()
+    let requestBody = try #require(requests.last?.body)
+    let body = try jsonObject(requestBody)
+    #expect(body["amount"] as? Int == 100)
+    #expect(body["assetId"] as? String == "rgb:\(invoiceTestAsset)")
+    #expect(body["durationSeconds"] as? Int == 60)
+    #expect(body["minConfirmations"] as? Int == 100)
+}
+
+@Test func gatewayReceiveRejectsTamperedOrIncompleteResponsesWithoutRetry() async throws {
+    let invoice = invoiceTestString()
+    let decoded = try decodeRGBInvoiceLocally(RGBInvoice(invoice))
+    let original: [String: Any] = [
+        "invoice": invoice, "recipientId": decoded.recipientID,
+        "expirationTimestamp": 87_400, "mode": "blind",
+    ]
+    for (field, value) in [
+        ("invoice", "rgb:private-payload"), ("recipientId", "other-recipient"),
+        ("expirationTimestamp", 87_401),
+        ("mode", "witness"), ("invoice", invoiceTestString(network: "bc")),
+        ("invoice", invoiceTestString(assignment: "BF")),
+    ] as [(String, Any)] {
+        var changed = original
+        changed[field] = value
+        let response = String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#),
+            gatewayResponse(response, statusCode: 201),
+        ])
+        let (backend, context) = try await initializedGateway(transport: transport)
+        do { _ = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest(witness: false)); Issue.record("expected response rejection") }
+        catch let error as SDKError {
+            #expect(error.code == .backendProtocolMismatch)
+            #expect(!error.message.contains("private-payload"))
+        }
+        #expect(await transport.snapshot().count == 2)
+    }
+}
+
+@Test func gatewayReceiveAllowsExplicitNullExpiryButRequiresTheWireField() async throws {
+    let invoice = invoiceTestString()
+    let decoded = try decodeRGBInvoiceLocally(RGBInvoice(invoice))
+    for includeExpiry in [true, false] {
+        var body: [String: Any] = ["invoice": invoice, "recipientId": decoded.recipientID, "mode": "blind"]
+        if includeExpiry { body["expirationTimestamp"] = NSNull() }
+        let response = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#),
+            gatewayResponse(response, statusCode: 201),
+        ])
+        let (backend, context) = try await initializedGateway(transport: transport)
+        if includeExpiry {
+            let result = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest(witness: false))
+            #expect(result.expirationTimestamp == nil)
+            #expect(try decodeRGBInvoiceLocally(result.invoice).expirationTimestamp?.rawValue == 87_400)
+        } else {
+            await #expect(throws: SDKError.self) {
+                _ = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest(witness: false))
+            }
+        }
+        #expect(await transport.snapshot().count == 2)
+    }
+}
+
+@Test func gatewayReceiveNeverRetriesCancellationOrUnexpectedHTTPResponses() async throws {
+    for response in [
+        gatewayResponse("{}", statusCode: 200), gatewayResponse("{}", statusCode: 202),
+        gatewayResponse("{}", statusCode: 302), gatewayResponse("{}", statusCode: 500),
+        gatewayResponse("not-json", statusCode: 201, mimeType: "text/plain"),
+    ] {
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#), response,
+        ])
+        let (backend, context) = try await initializedGateway(transport: transport)
+        await #expect(throws: SDKError.self) {
+            _ = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest())
+        }
+        #expect(await transport.snapshot().count == 2)
+    }
+    let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"receive-user","createdAt":1}"#)])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    await transport.cancelNextRequest()
+    await #expect(throws: CancellationError.self) {
+        _ = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest())
+    }
+    #expect(await transport.snapshot().count == 2)
+    try await backend.shutdown(session: context.session)
+    await #expect(throws: SDKError.self) {
+        _ = try await backend.onchainReceive(context: context, request: OnchainReceiveRequest())
+    }
+    #expect(await transport.snapshot().count == 2)
+}
+
+@Test func gatewaySyncAndRefreshReturnLocalObservationWithoutInventingChainTip() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_sync","createdAt":1}"#),
+        gatewayResponse(#"{"status":"ok"}"#),
+        gatewayResponse(#"{"status":"ok","futureAdditiveField":true}"#),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let sync = try await backend.syncWallet(context: context)
+    let refresh = try await backend.refreshWallet(context: context)
+    #expect(sync.completedAt.rawValue == 1_000)
+    #expect(refresh.completedAt.rawValue == 1_000)
+    #expect(sync.tipHeight == nil && refresh.tipHeight == nil)
+    let requests = await transport.snapshot()
+    #expect(requests.map(\.url.path) == ["/v1/me", "/v1/wallet/sync", "/v1/wallet/sync"])
+    #expect(requests.map(\.method) == [.get, .post, .post])
+    #expect(requests[1].body == nil && requests[2].body == nil)
+}
+
+@Test func gatewaySyncRejectsNonCompletionResponsesWithoutAutomaticRetry() async throws {
+    for response in [
+        gatewayResponse(#"{"status":"queued"}"#),
+        gatewayResponse(#"{"status":true}"#),
+        gatewayResponse(#"{"status":null}"#),
+        gatewayResponse("{}"), gatewayResponse("{malformed"),
+        gatewayResponse(#"{"status":"ok"}"#, statusCode: 202),
+        gatewayResponse(#"{"status":"ok"}"#, mimeType: "text/plain"),
+    ] {
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"u_sync","createdAt":1}"#), response,
+        ])
+        let (backend, context) = try await initializedGateway(transport: transport)
+        do {
+            _ = try await backend.syncWallet(context: context)
+            Issue.record("expected invalid completion response rejection")
+        } catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+        #expect(await transport.snapshot().count == 2)
+    }
+}
+
+@Test func gatewaySyncPreservesCancellationAndRejectsStaleSessionBeforeHTTP() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_sync","createdAt":1}"#),
+        gatewayResponse(#"{"status":"ok"}"#),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    await transport.cancelNextRequest()
+    await #expect(throws: CancellationError.self) { try await backend.refreshWallet(context: context) }
+    #expect(await transport.snapshot().count == 2)
+    try await backend.shutdown(session: context.session)
+    await #expect(throws: SDKError.self) { try await backend.syncWallet(context: context) }
+    #expect(await transport.snapshot().count == 2)
+}
+
+@Test func gatewaySyncRejectsOutOfDomainInjectedClock() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"u_sync","createdAt":1}"#),
+        gatewayResponse(#"{"status":"ok"}"#),
+    ])
+    let backend = GatewayWalletBackend(
+        configuration: try gatewayConfiguration(), transport: transport,
+        nowMilliseconds: { UInt64.max }
+    )
+    let walletID = try WalletID("sync-clock")
+    let session = try await backend.initialize(.init(
+        walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+    ))
+    await #expect(throws: SDKError.self) {
+        try await backend.syncWallet(context: .init(session: session, walletID: walletID, network: .regtest))
+    }
+    #expect(await transport.snapshot().count == 2)
+}
+
+@Test func gatewayReloadsRotatedCredentialAndBindsItToSameUserBeforeRequest() async throws {
+    let credentials = RotatingTestAPIKeyProvider("first-key")
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"same-user","createdAt":1}"#),
+        gatewayResponse(#"{"userId":"same-user","createdAt":1}"#),
+        gatewayResponse(#"{"btc":{"vanilla":{"settled":1,"future":1,"spendable":1},"colored":{"settled":0,"future":0,"spendable":0}},"assets":[]}"#),
+    ])
+    let backend = GatewayWalletBackend(
+        configuration: try GatewayBackendConfiguration(
+            baseURL: URL(string: "https://gateway.example")!, apiKeyProvider: credentials, network: .regtest
+        ), transport: transport
+    )
+    let walletID = try WalletID("rotation-wallet")
+    let session = try await backend.initialize(.init(
+        walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+    ))
+    await credentials.rotate("second-key")
+    let balance = try await backend.getBtcBalance(context: .init(session: session, walletID: walletID, network: .regtest))
+    #expect(balance.vanilla.settled.value == 1)
+    let requests = await transport.snapshot()
+    #expect(requests.map(\.url.path) == ["/v1/me", "/v1/me", "/v1/wallet/balances"])
+    #expect(requests.map { $0.headers["Authorization"] } == ["Bearer first-key", "Bearer second-key", "Bearer second-key"])
+    #expect(await credentials.loadCount == 2)
+}
+
+@Test func gatewayRefusesCredentialRotationToAnotherUserBeforeWalletRequest() async throws {
+    let credentials = RotatingTestAPIKeyProvider("first-key")
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"first-user","createdAt":1}"#),
+        gatewayResponse(#"{"userId":"other-user","createdAt":1}"#),
+    ])
+    let backend = GatewayWalletBackend(
+        configuration: try GatewayBackendConfiguration(
+            baseURL: URL(string: "https://gateway.example")!, apiKeyProvider: credentials, network: .regtest
+        ), transport: transport
+    )
+    let walletID = try WalletID("rotation-wallet")
+    let session = try await backend.initialize(.init(
+        walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+    ))
+    await credentials.rotate("another-user-key")
+    await #expect(throws: SDKError.self) {
+        try await backend.getBtcBalance(context: .init(session: session, walletID: walletID, network: .regtest))
+    }
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/me"])
+}
+
+@Test func gatewayPropagatesDurableIdentityBindingFailureBeforeOpeningSession() async throws {
+    let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"other-user","createdAt":1}"#)])
+    let backend = GatewayWalletBackend(
+        configuration: try gatewayConfiguration(), transport: transport,
+        identityObserver: { _ in throw SDKError.operationJournalUnavailable }
+    )
+    await #expect(throws: SDKError.self) {
+        try await backend.initialize(.init(
+            walletID: WalletID("journal-bound-wallet"), network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+        ))
+    }
+}
+
+private actor RotatingTestAPIKeyProvider: WalletAPIKeyProvider {
+    private var token: String
+    private(set) var loadCount = 0
+    init(_ token: String) { self.token = token }
+    func rotate(_ token: String) { self.token = token }
+    func loadAPIKey() async throws -> WalletAPIKey {
+        loadCount += 1
+        return try WalletAPIKey(copyingUTF8: Array(token.utf8))
+    }
+}
+
 @Test func gatewayConfigurationEnforcesTransportBoundaryAndRedactsToken() throws {
+    let ipv6 = try GatewayBackendConfiguration(
+        baseURL: #require(URL(string: "http://[::1]:8480")), bearerToken: "secret-token",
+        network: .regtest, allowInsecureLocalDevelopment: true
+    )
+    #expect(ipv6.baseURL.absoluteString == "http://[::1]:8480")
     #expect(throws: SDKError.self) {
         try GatewayBackendConfiguration(
             baseURL: #require(URL(string: "http://127.0.0.1:8480")),
@@ -100,7 +405,7 @@ import Testing
         #expect(error.code == .unsupported)
         #expect(
             error.details["feature"]
-                == "sendBtc requires an explicitly enabled, unverified gateway PSBT profile"
+                == "spending requires an explicitly enabled, unverified gateway PSBT profile"
         )
     }
 
@@ -137,10 +442,10 @@ import Testing
     #expect(await transport.snapshot().count == 1)
 }
 
-@Test func gatewayPreflightExplicitlyRejectsEveryNonSendOperation() async throws {
+@Test func gatewayPreflightKeepsMissingResultContractsDisabled() async throws {
     let backend = GatewayWalletBackend(configuration: try gatewayConfiguration())
-
-    for operation in [OperationKind.createUtxos, .onchainSend, .inflate] {
+    try await backend.preflightOperation(.createUtxos)
+    for operation in [OperationKind.onchainSend, .inflate] {
         do {
             try await backend.preflightOperation(operation)
             Issue.record("expected unsupported gateway profile for \(operation.rawValue)")
@@ -299,7 +604,7 @@ import Testing
             signer: GatewayNeverSigner(),
             request: request
         )
-        Issue.record("expected status-only recovery to remain ambiguous without the endpoint")
+        Issue.record("expected unavailable status recovery to remain ambiguous")
     } catch let error as SDKError {
         #expect(error.code == .operationAmbiguous)
         #expect(error.operationID == operationID)
@@ -309,7 +614,7 @@ import Testing
         await journal.load(walletID: walletID, idempotencyKey: request.idempotencyKey)
             == checkpoint
     )
-    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me"])
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/operations/14141414-1414-4414-8414-141414141414"])
 }
 
 @Test func gatewayCredentialRemainsBoundToOneWalletAcrossSessions() async throws {
@@ -538,6 +843,28 @@ import Testing
     #expect(requests.map(\.url.path) == [
         "/v1/me", "/v1/wallet/balances", "/v1/wallet/balances",
     ])
+}
+
+@Test func gatewayRejectsImpossibleBtcBalancesAsBackendProtocolFailures() async throws {
+    for field in ["settled", "future", "spendable"] {
+        for account in ["vanilla", "colored"] {
+            var wire: [String: UInt64] = ["settled": 0, "future": 0, "spendable": 0]
+            wire[field] = Satoshis.maximum + 1
+            let zero: [String: UInt64] = ["settled": 0, "future": 0, "spendable": 0]
+            let body: [String: Any] = ["btc": ["vanilla": account == "vanilla" ? wire : zero,
+                                                "colored": account == "colored" ? wire : zero],
+                                        "assets": []]
+            let encoded = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+            let transport = GatewayStubTransport(responses: [
+                gatewayResponse(#"{"userId":"u_balance_bound","createdAt":1}"#), gatewayResponse(encoded),
+            ])
+            let (backend, context) = try await initializedGateway(transport: transport)
+            do {
+                _ = try await backend.getBtcBalance(context: context)
+                Issue.record("expected impossible BTC balance rejection")
+            } catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+        }
+    }
 }
 
 @Test func gatewayRejectsAssetAmountsOutsideExactJavaScriptIntegerRange() async throws {
@@ -881,6 +1208,8 @@ import Testing
     let operationID = try OperationID("88888888-8888-4888-8888-888888888888")
     let responses = [
         ("invalid transaction ID", gatewayResponse(#"{"txid":"not-a-txid"}"#)),
+        ("noncanonical uppercase transaction ID", gatewayResponse("{\"txid\":\"\(expectedTxid.uppercased())\"}")),
+        ("noncanonical whitespace transaction ID", gatewayResponse("{\"txid\":\" \(expectedTxid) \"}")),
         (
             "different transaction ID",
             gatewayResponse("{\"txid\":\"\(String(repeating: "d", count: 64))\"}")
@@ -909,7 +1238,7 @@ import Testing
     }
 }
 
-@Test func gatewayCompletionPreservesDefinitivePreBroadcastRejection() async throws {
+@Test func gatewayCompletionDoesNotInventDefinitivePreBroadcastRejection() async throws {
     let txid = String(repeating: "c", count: 64)
     let operationID = try OperationID("99999999-9999-4999-8999-999999999999")
     let transport = GatewayStubTransport(responses: [
@@ -928,11 +1257,10 @@ import Testing
 
     do {
         _ = try await backend.submitSignedTransaction(submission)
-        Issue.record("expected definitive PSBT rejection")
+        Issue.record("expected ambiguous PSBT rejection")
     } catch let error as SDKError {
-        #expect(error.code == .backendRejected)
+        #expect(error.code == .operationAmbiguous)
         #expect(error.operationID == operationID)
-        #expect(error.details["backendCode"] == "PSBT_MISMATCH")
         #expect(!error.message.contains("hostile signed PSBT detail"))
     }
 }
@@ -1034,7 +1362,7 @@ import Testing
     }
 }
 
-@Test func gatewayOperationKindMismatchIsAProtocolViolation() async throws {
+@Test func gatewayCompletionOperationKindMismatchPreservesAmbiguity() async throws {
     let txid = String(repeating: "e", count: 64)
     let operationID = try OperationID("66666666-6666-4666-8666-666666666666")
     let transport = GatewayStubTransport(responses: [
@@ -1053,15 +1381,16 @@ import Testing
 
     do {
         _ = try await backend.submitSignedTransaction(submission)
-        Issue.record("expected operation-kind protocol mismatch")
+        Issue.record("expected ambiguous operation-kind completion response")
     } catch let error as SDKError {
-        #expect(error.code == .backendProtocolMismatch)
+        #expect(error.code == .operationAmbiguous)
+        #expect(error.retryable)
         #expect(error.operationID == operationID)
         #expect(!error.message.contains("hostile detail"))
     }
 }
 
-@Test func gatewayKeepsMissingOperationStatusFailClosed() async throws {
+@Test func gatewayStatusWithoutLocalSigningEvidenceFailsClosedBeforeHTTP() async throws {
     let transport = GatewayStubTransport(responses: [
         gatewayResponse(#"{"userId":"u_status","createdAt":1}"#),
     ])
@@ -1077,6 +1406,397 @@ import Testing
         #expect(error.code == .unsupported)
     }
     #expect(await transport.snapshot().count == 1)
+}
+
+@Test func gatewayCompletedStatusRecoversAfterRestartWithProfileDisabledAndOldExpiry() async throws {
+    let fixture = try await gatewayStatusFixture(
+        response: gatewayResponse(try gatewayStatusJSON()), profileEnabled: false
+    )
+    let result = try await fixture.recover()
+    #expect(result == fixture.checkpoint.validation?.unsignedTxid)
+    let stored = try #require(await fixture.journal.load(
+        walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey
+    ))
+    #expect(stored.phase == .terminal)
+    #expect(stored.preparedTransaction == fixture.checkpoint.preparedTransaction)
+    #expect(stored.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+    #expect(stored.validation == fixture.checkpoint.validation)
+    // Terminal replay has no HTTP, signing, prepare, or complete side effect.
+    #expect(try await fixture.recover() == result)
+    let requests = await fixture.transport.snapshot()
+    #expect(requests.map(\.method) == [.get, .get])
+    #expect(requests.map(\.url.path) == ["/v1/me", "/v1/onchain/operations/17171717-1717-4717-8717-171717171717"])
+    #expect(requests.last?.headers["Idempotency-Key"] == nil)
+    #expect(requests.last?.body == nil)
+}
+
+@Test func gatewayNoncompletedStatusNeverAuthorizesRetryOrTerminalExpiry() async throws {
+    for state in ["pending", "expired"] {
+        for hasTxid in [false, true] {
+            let body = try gatewayStatusJSON {
+                $0["state"] = state
+                $0["txid"] = hasTxid ? String(repeating: "e", count: 64) : NSNull()
+                $0["mayHaveBroadcast"] = hasTxid
+            }
+            let fixture = try await gatewayStatusFixture(response: gatewayResponse(body))
+            await fixture.expectAmbiguousAndUnchanged()
+            #expect(await fixture.transport.snapshot().map(\.method) == [.get, .get])
+        }
+    }
+}
+
+@Test func gatewayRecoveryRejectsEveryMalformedOrUnboundStatus() async throws {
+    let mutations: [(String, (inout [String: Any]) -> Void)] = [
+        ("different operation", { $0["opId"] = "18181818-1818-4818-8818-181818181818" }),
+        ("malformed operation", { $0["opId"] = "../wallet/balances" }),
+        ("wrong kind", { $0["kind"] = "create_utxos" }),
+        ("unknown lifecycle", { $0["state"] = "failed" }),
+        ("missing txid", { $0.removeValue(forKey: "txid") }),
+        ("null completed txid", { $0["txid"] = NSNull() }),
+        ("wrong txid", { $0["txid"] = String(repeating: "f", count: 64) }),
+        ("uppercase txid", { $0["txid"] = String(repeating: "E", count: 64) }),
+        ("malformed txid", { $0["txid"] = "untrusted backend error" }),
+        ("contradictory completed flag", { $0["mayHaveBroadcast"] = true }),
+        ("missing flag", { $0.removeValue(forKey: "mayHaveBroadcast") }),
+        ("wrong flag type", { $0["mayHaveBroadcast"] = "false" }),
+        ("zero creation", { $0["createdAt"] = 0 }),
+        ("negative creation", { $0["createdAt"] = -1 }),
+        ("fractional creation", { $0["createdAt"] = 1.5 }),
+        ("inverted timestamps", { $0["createdAt"] = 1_001_999 }),
+        ("changed expiry", { $0["expiresAt"] = 1_002_000 }),
+        ("unsafe JSON timestamp", { $0["expiresAt"] = 9_007_199_254_740_992 as UInt64 }),
+        ("wrong intent kind", { var i = $0["intent"] as! [String: Any]; i["kind"] = "send_asset"; $0["intent"] = i }),
+        ("different fee", { var i = $0["intent"] as! [String: Any]; i["feeRateSatPerVb"] = 3; $0["intent"] = i }),
+        ("smuggled RGB allowance", { var i = $0["intent"] as! [String: Any]; i["asset"] = [:] as [String: Any]; $0["intent"] = i }),
+        ("smuggled UTXO allowance", { var i = $0["intent"] as! [String: Any]; i["utxos"] = [:] as [String: Any]; $0["intent"] = i }),
+        ("missing intent field", { var i = $0["intent"] as! [String: Any]; i.removeValue(forKey: "asset"); $0["intent"] = i }),
+        ("extra recipient", { var i = $0["intent"] as! [String: Any]; let r = i["recipients"] as! [[String: Any]]; i["recipients"] = r + r; $0["intent"] = i }),
+    ]
+    for (name, mutate) in mutations {
+        let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON(mutate)))
+        await fixture.expectAmbiguousAndUnchanged()
+        #expect(await fixture.transport.snapshot().count == 2, "\(name)")
+    }
+    for (field, value) in [("address", "bcrt1pattackeraddress" as Any), ("amountSat", 10_001 as Any), ("scriptHex", "GG" as Any), ("scriptHex", "AA" as Any), ("scriptHex", "" as Any)] {
+        let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON {
+            var intent = $0["intent"] as! [String: Any]
+            var recipients = intent["recipients"] as! [[String: Any]]
+            recipients[0][field] = value
+            intent["recipients"] = recipients
+            $0["intent"] = intent
+        }))
+        await fixture.expectAmbiguousAndUnchanged()
+    }
+}
+
+@Test func gatewayRecoveryHTTPFailuresDoNotLoseSignedEvidence() async throws {
+    for response in [
+        gatewayResponse(#"{"error":{"code":"OP_NOT_FOUND"}}"#, statusCode: 404),
+        gatewayResponse(#"{"error":{"code":"UNAUTHORIZED"}}"#, statusCode: 401),
+        gatewayResponse(#"{"error":{"code":"OP_EXPIRED"}}"#, statusCode: 410),
+        gatewayResponse(#"{"error":{"code":"INTERNAL"}}"#, statusCode: 502),
+        gatewayResponse("{}", statusCode: 302),
+        gatewayResponse("{malformed"),
+        gatewayResponse(try gatewayStatusJSON(), statusCode: 201),
+        gatewayResponse(try gatewayStatusJSON(), mimeType: "text/plain"),
+    ] {
+        let fixture = try await gatewayStatusFixture(response: response)
+        await fixture.expectAmbiguousAndUnchanged()
+        #expect(await fixture.transport.snapshot().map(\.method) == [.get, .get])
+    }
+}
+
+@Test func gatewayAmbiguousCompletionImmediatelyPerformsOneReadOnlyReconciliation() async throws {
+    for response in [
+        gatewayResponse("<html>proxy error</html>", statusCode: 400, mimeType: "text/html"),
+        gatewayResponse(#"{"error":{"code":"UNREVIEWED_ERROR"}}"#, statusCode: 400),
+        gatewayResponse(#"{"error":{"code":"PSBT_MISMATCH"}}"#, statusCode: 400),
+        gatewayResponse(#"{"error":{"code":"FORBIDDEN"}}"#, statusCode: 403),
+        gatewayResponse(#"{"error":{"code":"OP_NOT_FOUND"}}"#, statusCode: 404),
+        gatewayResponse(#"{"error":{"code":"OP_ALREADY_COMPLETED"}}"#, statusCode: 409),
+        gatewayResponse(#"{"error":{"code":"IDEMPOTENCY_KEY_REUSED"}}"#, statusCode: 409),
+        gatewayResponse(#"{"error":{"code":"OP_KIND_MISMATCH"}}"#, statusCode: 409),
+        gatewayResponse(#"{"error":{"code":"OP_EXPIRED"}}"#, statusCode: 410),
+        gatewayResponse(#"{"error":{"code":"COMPLETE_AMBIGUOUS"}}"#, statusCode: 502),
+        gatewayResponse(#"{"txid":"malformed"}"#),
+    ] {
+        let fixture = try await gatewayStatusFixture(
+            response: response, phase: .signed, followingResponses: [gatewayResponse(try gatewayStatusJSON())]
+        )
+        #expect(try await fixture.recover() == fixture.checkpoint.validation?.unsignedTxid)
+        let requests = await fixture.transport.snapshot()
+        #expect(requests.map(\.method) == [.get, .post, .get])
+        #expect(requests[1].url.path == "/v1/onchain/send-btc/complete")
+        #expect(requests[2].url.path == "/v1/onchain/operations/17171717-1717-4717-8717-171717171717")
+    }
+}
+
+@Test func gatewayCompletionExpiryWithExpiredNullStatusRemainsSubmitting() async throws {
+    let body = try gatewayStatusJSON {
+        $0["state"] = "expired"; $0["txid"] = NSNull(); $0["mayHaveBroadcast"] = false
+    }
+    let fixture = try await gatewayStatusFixture(
+        response: gatewayResponse(#"{"error":{"code":"OP_EXPIRED"}}"#, statusCode: 410),
+        phase: .signed, followingResponses: [gatewayResponse(body)]
+    )
+    do { _ = try await fixture.recover(); Issue.record("expected ambiguity") }
+    catch let error as SDKError { #expect(error.code == .operationAmbiguous) }
+    let stored = try #require(await fixture.journal.load(walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey))
+    #expect(stored.phase == .submitting)
+    #expect(stored.terminalOutcome == nil)
+    #expect(stored.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+    #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get])
+}
+
+@Test func unknownCompletionRejectionRetainsSignedEvidenceAndNextCallOnlyPolls() async throws {
+    let pending = try gatewayStatusJSON {
+        $0["state"] = "pending"; $0["txid"] = NSNull(); $0["mayHaveBroadcast"] = false
+    }
+    for response in [
+        gatewayResponse("<html>upstream rejected</html>", statusCode: 400, mimeType: "text/html"),
+        gatewayResponse(#"{"error":{"code":"UNREVIEWED_ERROR"}}"#, statusCode: 422),
+        gatewayResponse(#"{"error":{"code":"PSBT_MISMATCH"}}"#, statusCode: 400),
+        gatewayResponse(#"{"error":{"code":"IDEMPOTENCY_KEY_REUSED"}}"#, statusCode: 409),
+        gatewayResponse(#"{"error":{"code":"OP_KIND_MISMATCH"}}"#, statusCode: 409),
+    ] {
+        let fixture = try await gatewayStatusFixture(
+            response: response, phase: .signed,
+            followingResponses: [gatewayResponse(pending), gatewayResponse(try gatewayStatusJSON())]
+        )
+        do { _ = try await fixture.recover(); Issue.record("expected ambiguity") }
+        catch let error as SDKError { #expect(error.code == .operationAmbiguous) }
+        let stored = try #require(await fixture.journal.load(
+            walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey
+        ))
+        #expect(stored.phase == .submitting && stored.terminalOutcome == nil)
+        #expect(stored.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+        #expect(try await fixture.recover() == fixture.checkpoint.validation?.unsignedTxid)
+        #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get, .get])
+    }
+}
+
+@Test func knownCompletionConflictsRetainIdentityThroughFailedReconciliation() async throws {
+    for code in ["IDEMPOTENCY_KEY_REUSED", "OP_KIND_MISMATCH"] {
+        for status in [401, 404, 500] {
+            let fixture = try await gatewayStatusFixture(
+                response: gatewayResponse("{\"error\":{\"code\":\"\(code)\"}}", statusCode: 409),
+                phase: .signed,
+                followingResponses: [gatewayResponse("{}", statusCode: status), gatewayResponse(try gatewayStatusJSON())]
+            )
+            do { _ = try await fixture.recover(); Issue.record("expected ambiguity") }
+            catch let error as SDKError {
+                #expect(error.code == .operationAmbiguous)
+                #expect(error.retryable)
+                #expect(error.operationID == fixture.checkpoint.operationID)
+            }
+            let retained = try #require(await fixture.journal.load(
+                walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey
+            ))
+            #expect(retained.phase == .submitting && retained.terminalOutcome == nil)
+            #expect(retained.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+            #expect(retained.validation == fixture.checkpoint.validation)
+            #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get])
+            #expect(try await fixture.recover() == fixture.checkpoint.validation?.unsignedTxid)
+            #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get, .get])
+        }
+    }
+}
+
+@Test func prepareIdempotencyConflictRemainsAConflictBeforeSigning() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"prepare-conflict","createdAt":1}"#),
+        gatewayResponse(#"{"error":{"code":"IDEMPOTENCY_KEY_REUSED"}}"#, statusCode: 409),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let request = try gatewayRecoveryRequest(key: "prepare-conflict")
+    let journal = InMemoryOperationJournal()
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: context.walletID, network: .regtest),
+        backend: backend, journal: journal, now: { 1 }
+    )
+    do {
+        _ = try await coordinator.sendBtc(backendContext: context, signer: GatewayNeverSigner(), request: request)
+        Issue.record("expected prepare conflict")
+    } catch let error as SDKError {
+        #expect(error.code == .operationConflict && !error.retryable)
+        #expect(error.details["idempotencyKey"] == request.idempotencyKey.value)
+    }
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/send-btc/prepare"])
+    #expect(await journal.load(walletID: context.walletID, idempotencyKey: request.idempotencyKey)?.phase == .created)
+}
+
+@Test func prepareOperationKindMismatchRemainsProtocolFailureBeforeSigning() async throws {
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"prepare-kind-conflict","createdAt":1}"#),
+        gatewayResponse(#"{"error":{"code":"OP_KIND_MISMATCH","message":"private-backend-detail"}}"#, statusCode: 409),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let request = try gatewayRecoveryRequest(key: "prepare-kind-conflict")
+    let journal = InMemoryOperationJournal()
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: context.walletID, network: .regtest),
+        backend: backend, journal: journal, now: { 1 }
+    )
+    do {
+        _ = try await coordinator.sendBtc(backendContext: context, signer: GatewayNeverSigner(), request: request)
+        Issue.record("expected prepare protocol failure")
+    } catch let error as SDKError {
+        #expect(error.code == .backendProtocolMismatch && !error.retryable)
+        #expect(error.operationID == nil)
+        #expect(!error.message.contains("private-backend-detail"))
+    }
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/send-btc/prepare"])
+    #expect(await journal.load(walletID: context.walletID, idempotencyKey: request.idempotencyKey)?.phase == .created)
+}
+
+@Test func completionConflictReconciliationCancellationPreservesEvidenceAndResumesReadOnly() async throws {
+    for code in ["IDEMPOTENCY_KEY_REUSED", "OP_KIND_MISMATCH"] {
+        let fixture = try await gatewayStatusFixture(
+            response: gatewayResponse("{\"error\":{\"code\":\"\(code)\"}}", statusCode: 409),
+            phase: .signed, followingResponses: [gatewayResponse(try gatewayStatusJSON())]
+        )
+        // GET me has already finished. Complete receives its 409; only the
+        // immediately following status GET reports transport cancellation.
+        await fixture.transport.cancelRequest(atOrdinal: 3)
+        await #expect(throws: CancellationError.self) { try await fixture.recover() }
+        let retained = try #require(await fixture.journal.load(
+            walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey
+        ))
+        #expect(retained.phase == .submitting && retained.terminalOutcome == nil)
+        #expect(retained.operationID == fixture.checkpoint.operationID)
+        #expect(retained.requestHash == fixture.checkpoint.requestHash)
+        #expect(retained.preparedTransaction == fixture.checkpoint.preparedTransaction)
+        #expect(retained.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+        #expect(retained.validation == fixture.checkpoint.validation)
+        #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get])
+        #expect(try await fixture.recover() == fixture.checkpoint.validation?.unsignedTxid)
+        #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post, .get, .get])
+    }
+}
+
+@Test func gatewayRecoveryRequiresOriginalRequestAndSignedJournalBeforeHTTP() async throws {
+    let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON()))
+    let changed = try SendBtcRequest(
+        address: fixture.request.address, amount: Satoshis(10_001), feeRate: fixture.request.feeRate,
+        idempotencyKey: fixture.request.idempotencyKey
+    )
+    await #expect(throws: SDKError.self) {
+        try await fixture.backend.getOperationForRecovery(context: fixture.context, checkpoint: fixture.checkpoint, request: changed)
+    }
+    let unsigned = try gatewayRecoveryCheckpoint(
+        phase: .signed, walletID: fixture.context.walletID, request: fixture.request,
+        operationID: #require(fixture.checkpoint.operationID), txid: #require(fixture.checkpoint.validation?.unsignedTxid)
+    )
+    await #expect(throws: SDKError.self) {
+        try await fixture.backend.getOperationForRecovery(context: fixture.context, checkpoint: unsigned, request: fixture.request)
+    }
+    #expect(await fixture.transport.snapshot().map(\.url.path) == ["/v1/me"])
+}
+
+@Test func gatewayRecoveryCancellationPreservesSubmittingAndCanResumeReadOnly() async throws {
+    let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON()), profileEnabled: false)
+    await fixture.transport.cancelNextRequest()
+    await #expect(throws: CancellationError.self) { try await fixture.recover() }
+    #expect(await fixture.journal.load(walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey) == fixture.checkpoint)
+    #expect(try await fixture.recover() == fixture.checkpoint.validation?.unsignedTxid)
+    #expect(await fixture.transport.snapshot().map(\.method) == [.get, .get, .get])
+}
+
+@Test func gatewayRecoveryRejectsCorruptedRetainedEvidenceBeforeHTTP() async throws {
+    let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON()))
+    for (prepared, signed, hash, operation) in [
+        (nil, nil, String(repeating: "0", count: 64), nil),
+        ("YQ", nil, nil, nil),
+        (nil, "YQ", nil, nil),
+        (nil, nil, nil, "not-a-gateway-uuid"),
+    ] as [(String?, String?, String?, String?)] {
+        let checkpoint = try gatewayRecoveryCheckpoint(
+            phase: .submitting, walletID: fixture.context.walletID, request: fixture.request,
+            operationID: operation.map { try OperationID($0) } ?? #require(fixture.checkpoint.operationID),
+            txid: #require(fixture.checkpoint.validation?.unsignedTxid),
+            preparedBase64: prepared, signedBase64: signed, validationPSBTHash: hash
+        )
+        await #expect(throws: SDKError.self) {
+            try await fixture.backend.getOperationForRecovery(context: fixture.context, checkpoint: checkpoint, request: fixture.request)
+        }
+    }
+    #expect(await fixture.transport.snapshot().map(\.url.path) == ["/v1/me"])
+}
+
+@Test func gatewayUnrelatedAmbiguousSubmissionErrorDoesNotTriggerStatusLookup() async throws {
+    let fixture = try await gatewayStatusFixture(response: gatewayResponse(try gatewayStatusJSON()), phase: .signed)
+    let otherID = try OperationID("18181818-1818-4818-8818-181818181818")
+    await fixture.transport.failNextRequest(.operationAmbiguous(otherID))
+    do { _ = try await fixture.recover(); Issue.record("expected unrelated ambiguity") }
+    catch let error as SDKError {
+        #expect(error.code == .operationAmbiguous)
+        #expect(error.operationID == otherID)
+    }
+    #expect(await fixture.transport.snapshot().map(\.method) == [.get, .post])
+    let stored = await fixture.journal.load(walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey)
+    #expect(stored?.phase == .submitting)
+    #expect(stored?.signedPsbtBase64 == fixture.checkpoint.signedPsbtBase64)
+}
+
+private struct GatewayStatusFixture {
+    let backend: GatewayWalletBackend
+    let context: BackendContext
+    let checkpoint: OperationCheckpoint
+    let request: SendBtcRequest
+    let journal: InMemoryOperationJournal
+    let coordinator: OperationCoordinator
+    let transport: GatewayStubTransport
+
+    func recover() async throws -> TransactionID {
+        try await coordinator.sendBtc(backendContext: context, signer: GatewayNeverSigner(), request: request)
+    }
+
+    func expectAmbiguousAndUnchanged() async {
+        do { _ = try await recover(); Issue.record("expected an ambiguous operation") }
+        catch let error as SDKError {
+            #expect(error.code == .operationAmbiguous)
+            #expect(error.operationID == checkpoint.operationID)
+        } catch { Issue.record("unexpected error type") }
+        #expect(await journal.load(walletID: context.walletID, idempotencyKey: request.idempotencyKey) == checkpoint)
+    }
+}
+
+private func gatewayStatusFixture(
+    response: GatewayHTTPResponse,
+    profileEnabled: Bool = true,
+    phase: OperationPhase = .submitting,
+    followingResponses: [GatewayHTTPResponse] = []
+) async throws -> GatewayStatusFixture {
+    let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"recovery-user","createdAt":1}"#), response] + followingResponses)
+    let backend = GatewayWalletBackend(configuration: try gatewayConfiguration(allowUnverifiedPsbtProfile: profileEnabled), transport: transport)
+    let walletID = try WalletID("status-wallet")
+    let session = try await backend.initialize(.init(walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1))
+    let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+    let request = try gatewayRecoveryRequest(key: "status-key")
+    let checkpoint = try gatewayRecoveryCheckpoint(
+        phase: phase, walletID: walletID, request: request,
+        operationID: OperationID("17171717-1717-4717-8717-171717171717"),
+        txid: TransactionID(String(repeating: "e", count: 64))
+    )
+    let journal = InMemoryOperationJournal()
+    try await journal.save(checkpoint)
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: walletID, network: .regtest),
+        backend: backend, journal: journal, now: { 1 }
+    )
+    return .init(backend: backend, context: context, checkpoint: checkpoint, request: request, journal: journal, coordinator: coordinator, transport: transport)
+}
+
+private func gatewayStatusJSON(_ mutate: (inout [String: Any]) -> Void = { _ in }) throws -> String {
+    var value: [String: Any] = [
+        "opId": "17171717-1717-4717-8717-171717171717", "kind": "send_btc", "state": "completed",
+        "txid": String(repeating: "e", count: 64), "mayHaveBroadcast": false,
+        "createdAt": 1_000_000, "expiresAt": 1_001_999,
+        "intent": ["kind": "send_btc", "feeRateSatPerVb": 2, "asset": NSNull(), "utxos": NSNull(),
+                   "recipients": [["address": "bcrt1precoveryaddress", "amountSat": 10_000, "scriptHex": "0014"]]],
+    ]
+    mutate(&value)
+    return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
 }
 
 private func gatewayConfiguration(
@@ -1106,7 +1826,10 @@ private func gatewayRecoveryCheckpoint(
     walletID: WalletID,
     request: SendBtcRequest,
     operationID: OperationID,
-    txid: TransactionID
+    txid: TransactionID,
+    preparedBase64: String? = nil,
+    signedBase64: String? = nil,
+    validationPSBTHash: String? = nil
 ) throws -> OperationCheckpoint {
     let requestHash = try RequestHasher.sendBtc(network: .regtest, request: request)
     let prepared = try PreparedTransaction(
@@ -1115,11 +1838,11 @@ private func gatewayRecoveryCheckpoint(
         requestHash: requestHash,
         network: .regtest,
         operation: .sendBtc,
-        psbtBase64: "prepared-psbt",
+        psbtBase64: preparedBase64 ?? Data("prepared-psbt".utf8).base64EncodedString(),
         expiresAt: .init(rawValue: 1_001)
     )
     let validation = try LocalValidationReport(
-        psbtSHA256: String(repeating: "a", count: 64),
+        psbtSHA256: validationPSBTHash ?? SHA256.hash(data: Data("prepared-psbt".utf8)).map { String(format: "%02x", $0) }.joined(),
         intentSHA256: String(repeating: "b", count: 64),
         unsignedTxid: txid,
         totalInput: Satoshis(20_000),
@@ -1141,7 +1864,7 @@ private func gatewayRecoveryCheckpoint(
         phase: phase,
         operationID: operationID,
         preparedTransaction: prepared,
-        signedPsbtBase64: "signed-psbt",
+        signedPsbtBase64: signedBase64 ?? Data("signed-psbt".utf8).base64EncodedString(),
         validation: validation,
         terminalOutcome: phase == .terminal
             ? .succeeded(.sendBtc(operationID: operationID, txid: txid))
@@ -1228,6 +1951,9 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
 private actor GatewayStubTransport: GatewayHTTPTransport {
     private var responses: [GatewayHTTPResponse]
     private var requests: [GatewayHTTPRequest] = []
+    private var cancelNext = false
+    private var cancellationOrdinal: Int?
+    private var nextError: SDKError?
 
     init(responses: [GatewayHTTPResponse]) {
         self.responses = responses
@@ -1235,6 +1961,11 @@ private actor GatewayStubTransport: GatewayHTTPTransport {
 
     func send(_ request: GatewayHTTPRequest) async throws -> GatewayHTTPResponse {
         requests.append(request)
+        if cancelNext || cancellationOrdinal == requests.count {
+            cancelNext = false; cancellationOrdinal = nil
+            throw CancellationError()
+        }
+        if let error = nextError { nextError = nil; throw error }
         guard !responses.isEmpty else {
             throw SDKError.invariant("test transport has no queued response")
         }
@@ -1242,6 +1973,9 @@ private actor GatewayStubTransport: GatewayHTTPTransport {
     }
 
     func snapshot() -> [GatewayHTTPRequest] { requests }
+    func cancelNextRequest() { cancelNext = true }
+    func cancelRequest(atOrdinal ordinal: Int) { cancellationOrdinal = ordinal }
+    func failNextRequest(_ error: SDKError) { nextError = error }
 }
 
 private struct GatewayNeverSigner: LocalSigningEngine {
@@ -1253,6 +1987,14 @@ private struct GatewayNeverSigner: LocalSigningEngine {
 
     func verifyReservedAddress(_ reservation: ReservedAddress) throws {
         throw SDKError.invariant("unexpected address verification")
+    }
+
+    func validateBeforeSubmission(
+        prepared: PreparedTransaction, request: SendBtcRequest,
+        policy: LocalSigningPolicy, retainedValidation: LocalValidationReport
+    ) throws {
+        // Transport/recovery fixtures intentionally contain synthetic PSBTs.
+        // The packaged signer suite independently enforces current policy.
     }
 
     func validateAndSign(
@@ -1287,4 +2029,98 @@ private actor GatewayInitializeBarrierTransport: GatewayHTTPTransport {
     }
 
     func snapshot() -> [GatewayHTTPRequest] { requests }
+}
+
+@Test func gatewayBalanceCannotReturnIntoAShutDownSession() async throws {
+    for asset in [false, true] {
+        let transport = GatewayBalanceBarrierTransport()
+        let backend = GatewayWalletBackend(configuration: try gatewayConfiguration(), transport: transport)
+        let walletID = try WalletID("session-balance-race")
+        let session = try await backend.initialize(.init(
+            walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1))
+        let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+        let read = Task {
+            if asset { _ = try await backend.getAssetBalance(context: context, assetID: AssetID("rgb:test")) }
+            else { _ = try await backend.getBtcBalance(context: context) }
+        }
+        await transport.waitUntilRequested()
+        try await backend.shutdown(session: session)
+        await transport.finish()
+        do { try await read.value; Issue.record("stale balance escaped its session") }
+        catch let error as SDKError { #expect(error.code == .invalidState) }
+    }
+}
+
+private actor GatewayBalanceBarrierTransport: GatewayHTTPTransport {
+    private var pending: CheckedContinuation<GatewayHTTPResponse, Never>?
+    private var requested: CheckedContinuation<Void, Never>?
+    func send(_ request: GatewayHTTPRequest) async throws -> GatewayHTTPResponse {
+        if request.url.path == "/v1/me" { return gatewayResponse(#"{"userId":"balance-race","createdAt":1}"#) }
+        return await withCheckedContinuation { continuation in
+            pending = continuation
+            requested?.resume()
+            requested = nil
+        }
+    }
+    func waitUntilRequested() async {
+        if pending != nil { return }
+        await withCheckedContinuation { requested = $0 }
+    }
+    func finish() {
+        pending?.resume(returning: gatewayResponse(
+            #"{"btc":{"vanilla":{"settled":1,"future":1,"spendable":1},"colored":{"settled":0,"future":0,"spendable":0}},"assets":[{"assetId":"rgb:test","balance":{"settled":1,"future":1,"spendable":1}}]}"#))
+        pending = nil
+    }
+}
+
+@Test func gatewayCancelledCredentialValidationCannotDispatchPreparation() async throws {
+    let provider = RotatingTestAPIKeyProvider("first-credential")
+    let transport = GatewayCredentialBarrierTransport()
+    let backend = GatewayWalletBackend(configuration: try GatewayBackendConfiguration(
+        baseURL: URL(string: "https://gateway.example")!, apiKeyProvider: provider, network: .regtest,
+        allowUnverifiedPsbtProfile: true
+    ), transport: transport)
+    let walletID = try WalletID("credential-cancellation")
+    let session = try await backend.initialize(.init(
+        walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1))
+    let context = BackendContext(session: session, walletID: walletID, network: .regtest)
+    await provider.rotate("next-credential")
+    let request = try SendBtcRequest(address: BitcoinAddress("bcrt1pboundedaddress"), amount: Satoshis(1_000))
+    let prepare = Task {
+        try await backend.prepareSendBtc(.init(
+            context: OperationRequestContext(backend: context, idempotencyKey: request.idempotencyKey,
+                                            requestHash: RequestHasher.sendBtc(network: .regtest, request: request)),
+            request: request))
+    }
+    await transport.waitUntilValidation()
+    prepare.cancel()
+    await transport.finish()
+    do { _ = try await prepare.value; Issue.record("cancelled preparation returned a result") }
+    catch is CancellationError { }
+    #expect(await transport.paths() == ["/v1/me", "/v1/me"])
+}
+
+private actor GatewayCredentialBarrierTransport: GatewayHTTPTransport {
+    private var requests: [GatewayHTTPRequest] = []
+    private var pending: CheckedContinuation<GatewayHTTPResponse, Never>?
+    private var requested: CheckedContinuation<Void, Never>?
+    func send(_ request: GatewayHTTPRequest) async throws -> GatewayHTTPResponse {
+        requests.append(request)
+        guard request.url.path == "/v1/me" else { throw SDKError.invariant("unexpected cancelled effect") }
+        if requests.count == 1 { return gatewayResponse(#"{"userId":"credential-cancel","createdAt":1}"#) }
+        return await withCheckedContinuation { continuation in
+            pending = continuation
+            requested?.resume()
+            requested = nil
+        }
+    }
+    func waitUntilValidation() async {
+        if pending != nil { return }
+        await withCheckedContinuation { requested = $0 }
+    }
+    func finish() {
+        pending?.resume(returning: gatewayResponse(#"{"userId":"credential-cancel","createdAt":1}"#))
+        pending = nil
+    }
+    func paths() -> [String] { requests.map(\.url.path) }
 }

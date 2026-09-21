@@ -41,8 +41,10 @@ public enum OperationTerminalOutcome: Hashable, Sendable {
 /// Production journals must atomically encrypt and authenticate the encoded
 /// checkpoint because both prepared and signed PSBT bytes are sensitive. The
 /// exact prepared transaction is retained from PREPARED onward, and the exact
-/// signed bytes are retained from SIGNED onward. A restart never prepares or
-/// signs a different transaction for the same caller intent.
+/// signed bytes are retained while the operation can still be submitted or
+/// reconciled. Definitive terminal state may be compacted to an immutable
+/// receipt retaining replay identity, outcome and local validation. A restart
+/// never prepares or signs a different transaction for the same caller intent.
 @_spi(Backend)
 public struct OperationCheckpoint: Hashable, Sendable {
     public let walletID: WalletID
@@ -74,9 +76,11 @@ public struct OperationCheckpoint: Hashable, Sendable {
         validation: LocalValidationReport? = nil,
         terminalOutcome: OperationTerminalOutcome? = nil
     ) throws {
+        let isCompactTerminal = phase == .terminal && preparedTransaction == nil
         let hasPreparedState = phase != .created
         guard hasPreparedState == (operationID != nil),
-              hasPreparedState == (preparedTransaction != nil) else {
+              (hasPreparedState && !isCompactTerminal) == (preparedTransaction != nil),
+              !isCompactTerminal || signedPsbtBase64 == nil else {
             throw SDKError.invalidArgument(
                 "preparedTransaction",
                 "operation ID and exact preparation must be present after the created phase"
@@ -94,7 +98,7 @@ public struct OperationCheckpoint: Hashable, Sendable {
             }
         }
 
-        guard (signedPsbtBase64 == nil) == (validation == nil) else {
+        guard isCompactTerminal || (signedPsbtBase64 == nil) == (validation == nil) else {
             throw SDKError.invalidArgument("validation", "must accompany signed transaction bytes")
         }
         if let signedPsbtBase64 {
@@ -140,7 +144,7 @@ public struct OperationCheckpoint: Hashable, Sendable {
                         "result variant does not match operation kind"
                     )
                 }
-                guard let validation, signedPsbtBase64 != nil else {
+                guard let validation, isCompactTerminal || signedPsbtBase64 != nil else {
                     throw SDKError.invalidArgument(
                         "terminalOutcome",
                         "a successful outcome requires the exact signed payload and validation"
@@ -173,6 +177,20 @@ public struct OperationCheckpoint: Hashable, Sendable {
         self.signedPsbtBase64 = signedPsbtBase64
         self.validation = validation
         self.terminalOutcome = terminalOutcome
+    }
+
+    /// Internal storage representation, never a source of new authorization.
+    /// All identities, results and validation survive; no terminal key expires.
+    var compactTerminal: OperationCheckpoint {
+        get throws {
+            guard phase == .terminal else { return self }
+            return try OperationCheckpoint(
+                walletID: walletID, idempotencyKey: idempotencyKey,
+                requestHash: requestHash, operationKind: operationKind,
+                phase: .terminal, operationID: operationID,
+                validation: validation, terminalOutcome: terminalOutcome
+            )
+        }
     }
 }
 
@@ -223,35 +241,39 @@ public actor InMemoryOperationJournal: OperationJournal {
     public func save(_ checkpoint: OperationCheckpoint) throws {
         let key = Key(walletID: checkpoint.walletID, idempotencyKey: checkpoint.idempotencyKey)
         if let current = checkpoints[key] {
+            try validateCheckpointTransition(from: current, to: checkpoint)
             if current == checkpoint { return }
-            if current.phase == .terminal {
-                throw SDKError.invariant("terminal operation checkpoint is immutable")
-            }
-            guard current.requestHash == checkpoint.requestHash,
-                  current.operationKind == checkpoint.operationKind else {
-                throw SDKError.operationConflict(checkpoint.idempotencyKey)
-            }
-            guard checkpoint.phase > current.phase else {
-                throw SDKError.invariant("operation phase did not advance monotonically")
-            }
-            if let existing = current.operationID, existing != checkpoint.operationID {
-                throw SDKError.backendProtocolMismatch(
-                    "operation ID changed for an existing idempotency key",
-                    operationID: checkpoint.operationID
-                )
-            }
-            if let existing = current.preparedTransaction,
-               existing != checkpoint.preparedTransaction {
-                throw SDKError.invariant("prepared transaction changed during retry")
-            }
-            if let existing = current.signedPsbtBase64,
-               existing != checkpoint.signedPsbtBase64 {
-                throw SDKError.invariant("signed transaction bytes changed during retry")
-            }
-            if let existing = current.validation, existing != checkpoint.validation {
-                throw SDKError.invariant("local validation report changed during retry")
-            }
         }
         checkpoints[key] = checkpoint
+    }
+}
+
+func validateCheckpointTransition(from current: OperationCheckpoint, to next: OperationCheckpoint) throws {
+    if current == next { return }
+    if current.phase == .terminal, next.phase == .terminal,
+       try current.compactTerminal == next.compactTerminal { return }
+    guard current.walletID == next.walletID, current.idempotencyKey == next.idempotencyKey else {
+        throw SDKError.operationJournalUnavailable
+    }
+    if current.phase == .terminal { throw SDKError.invariant("terminal operation checkpoint is immutable") }
+    guard current.requestHash == next.requestHash, current.operationKind == next.operationKind else {
+        throw SDKError.operationConflict(next.idempotencyKey)
+    }
+    guard next.phase > current.phase else {
+        throw SDKError.invariant("operation phase did not advance monotonically")
+    }
+    if let existing = current.operationID, existing != next.operationID {
+        throw SDKError.backendProtocolMismatch(
+            "operation ID changed for an existing idempotency key", operationID: next.operationID
+        )
+    }
+    if let existing = current.preparedTransaction, existing != next.preparedTransaction {
+        throw SDKError.invariant("prepared transaction changed during retry")
+    }
+    if let existing = current.signedPsbtBase64, existing != next.signedPsbtBase64 {
+        throw SDKError.invariant("signed transaction bytes changed during retry")
+    }
+    if let existing = current.validation, existing != next.validation {
+        throw SDKError.invariant("local validation report changed during retry")
     }
 }
