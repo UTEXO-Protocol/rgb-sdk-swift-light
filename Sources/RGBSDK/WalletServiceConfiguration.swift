@@ -94,19 +94,44 @@ public actor KeychainAPIKeyStore: WalletAPIKeyProvider {
     }
 }
 
-/// Stable app-facing service options. The full local SDK must preserve this initializer,
-/// even when it no longer needs a wallet orchestration service.
+/// A fresh observation of the selected Bitcoin chain's height.
+public struct WalletChainContext: Hashable, Sendable {
+    public let network: Network
+    public let tipHeight: UInt32
+    /// Time the trusted source observed its tip, not the block timestamp.
+    public let observedAt: UnixSeconds
+
+    public init(network: Network, tipHeight: UInt32, observedAt: UnixSeconds) throws {
+        guard tipHeight < 500_000_000 else {
+            throw SDKError.invalidArgument("tipHeight", "must be a Bitcoin block height, not a timestamp")
+        }
+        self.network = network
+        self.tipHeight = tipHeight
+        self.observedAt = observedAt
+    }
+}
+
+/// App-owned, trusted chain context. Never derive the height from the prepared
+/// PSBT. Use an independently configured source for the requested network.
+public protocol WalletChainContextProvider: Sendable {
+    func loadChainContext(network: Network) async throws -> WalletChainContext
+}
+
+/// Stable app-facing service options. The full local SDK must preserve this
+/// initializer even when it no longer needs a wallet orchestration service.
 public struct WalletServiceConfiguration: Sendable, CustomStringConvertible, CustomReflectable {
     public let baseURL: URL
     public let apiKeyProvider: any WalletAPIKeyProvider
     public let allowInsecureLocalDevelopment: Bool
     public let requestTimeout: TimeInterval
+    public let chainContextProvider: (any WalletChainContextProvider)?
 
     public init(
         baseURL: URL,
         apiKeyProvider: any WalletAPIKeyProvider,
         allowInsecureLocalDevelopment: Bool = false,
-        requestTimeout: TimeInterval = 30
+        requestTimeout: TimeInterval = 30,
+        chainContextProvider: (any WalletChainContextProvider)? = nil
     ) throws {
         // Reuse the transport policy; network-specific validation happens in the factory.
         let validated = try GatewayBackendConfiguration(
@@ -118,6 +143,7 @@ public struct WalletServiceConfiguration: Sendable, CustomStringConvertible, Cus
         self.apiKeyProvider = apiKeyProvider
         self.allowInsecureLocalDevelopment = allowInsecureLocalDevelopment
         self.requestTimeout = requestTimeout
+        self.chainContextProvider = chainContextProvider
     }
 
     public var description: String { "WalletServiceConfiguration(baseURL=\(baseURL), apiKeyProvider=[REDACTED])" }

@@ -18,7 +18,7 @@
     {
       "path": "Artifacts/RGBSDK.xcframework/Info.plist",
       "bytes": 1573,
-      "sha256": "8cff004a96807f461e46e4103b7df0e9d694e7c6f1eeb24da729eab3df3bc5dc"
+      "sha256": "129c25b6c8bed053b67dd95e9892a151912fb8627fa7ef4be0308a6aef5eaf42"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/Info.plist",
@@ -27,8 +27,8 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-ios.swiftinterface",
-      "bytes": 52094,
-      "sha256": "ba766f195049ab2bf04ba0ca8bb4c5e664db5ea1dbdc28c054b249ce28b7934c"
+      "bytes": 53002,
+      "sha256": "c0bbd05ce0c6a1dff9df142604a75c0042153217ade2ceb982c2ce5baa133d5c"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/PrivacyInfo.xcprivacy",
@@ -37,8 +37,8 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64/RGBSDK.framework/RGBSDK",
-      "bytes": 10304328,
-      "sha256": "32779393bc994b67868edcaef9ab19be6f008945e241426e1343ac93e8202efd"
+      "bytes": 10808776,
+      "sha256": "b6b982f016f89ca2128426abed352a7e301fde1c93c366d012a4139e014e207e"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Info.plist",
@@ -47,13 +47,13 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-ios-simulator.swiftinterface",
-      "bytes": 52104,
-      "sha256": "ed7ef6c3681cb42c27e559f75edd5c034ac647abf1f19c82c3eff1549c2c2a1e"
+      "bytes": 53012,
+      "sha256": "8be23dd58425eb83eba3bf87b84f4f50bd0e1e8de2434ba0e50d9cee47aedc93"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/Modules/RGBSDK.swiftmodule/x86_64-apple-ios-simulator.swiftinterface",
-      "bytes": 52105,
-      "sha256": "2ed14b806aa8f61fded6f0f402c9c26e35c004f642e8d0359d845dbca322f1ef"
+      "bytes": 53013,
+      "sha256": "d27c08adc5a0656a83c5c0f9f98d2ebdc061e8644967d0968212cd1c38a02deb"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/PrivacyInfo.xcprivacy",
@@ -62,8 +62,8 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/ios-arm64_x86_64-simulator/RGBSDK.framework/RGBSDK",
-      "bytes": 20140392,
-      "sha256": "f6456bacd4bf49e98d4851842aa84232cca830e5ca0c6036a05bf51d183efbfc"
+      "bytes": 21136560,
+      "sha256": "4852b8c55288fdae2d1b182fb0dfbf8f7bb7c40bf83479fcfb9c05a97cdda016"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Info.plist",
@@ -72,13 +72,13 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/arm64-apple-macos.swiftinterface",
-      "bytes": 52097,
-      "sha256": "7831f7e3e34dc7f20dac117aa58c8417c2291fbf4a0b957fb560091b9d782d00"
+      "bytes": 53005,
+      "sha256": "da8620e467d2138aba471c4fcb7357b0362cd2cedbe47a986d60da53f0a0fa7e"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/Modules/RGBSDK.swiftmodule/x86_64-apple-macos.swiftinterface",
-      "bytes": 52098,
-      "sha256": "3a8ca58ad8e8d239673caab76f5b56bceac421758272f71f6843a2123c29926e"
+      "bytes": 53006,
+      "sha256": "8c3db0f56b0a380c862510b998038777c40cc7d351452ed20aaeda4cc5443cb1"
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/PrivacyInfo.xcprivacy",
@@ -87,8 +87,8 @@
     },
     {
       "path": "Artifacts/RGBSDK.xcframework/macos-arm64_x86_64/RGBSDK.framework/RGBSDK",
-      "bytes": 20556112,
-      "sha256": "1b5219015f5071939cfc4f50b6238cff2078b60cbdd079664799c45f88d821b7"
+      "bytes": 21562728,
+      "sha256": "8fd31c85cc4e1d0b4e069b640349d5f98cb7de006da531ee7687eb75700ba639"
     },
     {
       "path": "Artifacts/UtexoLocalSigner.xcframework/Info.plist",
@@ -172,8 +172,8 @@
     },
     {
       "path": "NativeSource/facade-build.json",
-      "bytes": 7594,
-      "sha256": "f73d5cbacca327713b72a294b628d6a875e2f2d632ccd1f01cce6234b49f97ed"
+      "bytes": 7708,
+      "sha256": "afa6f04e34b05a52a82b6f037ee36cfe1174c49f6c232ea08f79b54a0e6afb65"
     },
     {
       "path": "NativeSource/license-review.json",

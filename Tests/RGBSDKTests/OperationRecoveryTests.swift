@@ -742,7 +742,7 @@ private struct RecoveryFixture {
 }
 
 private struct NeverSigner: LocalSigningEngine {
-    let capabilities = WalletCapabilities.locked
+    let capabilities = RecordingSigner.capabilityFixture
     func identity() throws -> WalletIdentity { throw SDKError.invariant("unexpected identity") }
     func verifyReservedAddress(_ reservation: ReservedAddress) throws {
         throw SDKError.invariant("unexpected address verification")
@@ -764,7 +764,7 @@ private struct NeverSigner: LocalSigningEngine {
 }
 
 private final class SubmissionValidationRejectingSigner: LocalSigningEngine, @unchecked Sendable {
-    let capabilities = WalletCapabilities.locked
+    let capabilities = RecordingSigner.capabilityFixture
     private let lock = NSLock()
     private var recordedPolicies: [LocalSigningPolicy] = []
     var policies: [LocalSigningPolicy] { lock.withLock { recordedPolicies } }
@@ -785,7 +785,8 @@ private final class SubmissionValidationRejectingSigner: LocalSigningEngine, @un
 }
 
 private final class RecordingSigner: LocalSigningEngine, @unchecked Sendable {
-    let capabilities = WalletCapabilities(
+    let capabilities = RecordingSigner.capabilityFixture
+    static let capabilityFixture = WalletCapabilities(
         localKeyDerivation: true,
         localTransactionValidation: true,
         localTransactionSigning: true,

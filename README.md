@@ -32,19 +32,26 @@ tests, the regtest suite, and an independent security review are complete.
   transport and independent checks of the returned network, beneficiary mode,
   encoded amount, asset, expiry and public response consistency.
 
-The ordinary wallet factory still gates new gateway money movement. Its legacy
-local signer profile supports BTC only. A separate internal, explicitly selected
-`utexo.psbt.rgb-lib.v1` profile now validates/signs BTC, exact create-UTXO plans
-and fungible RGB **Bitcoin** intent using the real branch-0 builder shape. It
-requires an independently trusted maximum block height and is not selected by
-an application API or an untrusted PSBT. `inflate` still has no reviewed flow.
+The ordinary wallet factory enables `sendBtc`, `createUtxos`, and `onchainSend`
+using the `utexo.psbt.rgb-lib.v1` profile. It validates/signs BTC, exact create-UTXO
+plans, and fungible RGB **Bitcoin** intent using the native branch-0 builder shape.
+Fresh signing requires an app-owned `WalletChainContextProvider` supplied through
+`WalletServiceConfiguration.chainContextProvider`. The provider returns
+`WalletChainContext(network:tipHeight:observedAt:)` from an independently trusted
+chain source; never derive it from the prepared PSBT. The SDK checks the exact
+network, height below 500,000,000, age at most 300 seconds and future clock skew
+at most 30 seconds. `observedAt` is observation time, not the block timestamp.
+It refreshes context before preparation, signing and retained-policy revalidation.
+The current gateway has no chain-tip route, so the SDK does not invent one.
+Read-only use and completed/submitting recovery need no provider. Without one,
+local signing capabilities are unavailable, but reads and recovery still work.
+`inflate` still has no reviewed flow.
 Local RGB state validation is not implemented and cannot be inferred from a
 Bitcoin PSBT.
 
 The shared coordinator handles BTC/create/RGB preparation, signing, retained
 policy revalidation, exact-byte submission, ambiguity and terminal replay. The
-gateway create/RGB routes remain gated because their durable results/recovery
-and complete adapter contracts are not available. Complete/status create results
+gateway maps all three prepare/complete/status routes. Complete/status create results
 must match the exact locally authorized output count, not the requested count.
 Expired RGB invoices and disabled new-operation capabilities cannot block an
 already-submitting status lookup or replay of an authenticated terminal result.
@@ -55,6 +62,14 @@ app's absolute and rate ceilings. It permits only the native conservative
 arbitrary percentage/dust allowance. The legacy profile and journal digest
 semantics remain unchanged. Untouched gateway fixtures are exercised locally;
 this does not establish completion/broadcast/restart interoperability.
+
+**Accepted backend limitation:** enabling these APIs does not fix server crash
+recovery. A broadcast followed by a crash before its outcome is persisted, or
+expiry of an unresolved operation, may remain ambiguous indefinitely. The SDK
+retains the original signed checkpoint and performs status-only recovery; it
+never automatically replaces the payment. Preserve the request and idempotency
+key and do not create a new payment to work around uncertainty. Full deployment,
+native RGB allocation/reservation behavior and crash recovery remain unqualified.
 
 The signer does guarantee that every `sendBtc` input belongs to the locally
 re-derived vanilla BIP86 account (external or change), never the colored
@@ -206,11 +221,10 @@ application feature code must continue to call only `UTEXOWallet`. The adapter:
 
 - requires HTTPS by default; exact loopback HTTP for a local container requires
   the explicit `allowInsecureLocalDevelopment: true` configuration flag;
-- keeps fresh spending disabled by default. Development against the provisional
-  profile requires the explicit `allowUnverifiedPsbtProfile: true` SPI flag;
-  reads and watch-only registration remain available without that flag.
-  Disabling it later still permits durable terminal replay and status-only
-  reconciliation of an already-SUBMITTING operation;
+- enables fresh spending through ordinary factory configuration when an independent
+  chain-context provider is supplied; the legacy infrastructure initializer still
+  requires its explicit profile flag. Missing/failed context never blocks durable
+  terminal replay or status-only reconciliation of an already-SUBMITTING operation;
 - refuses redirects, bounds request/response bodies, disables URLSession caches,
   cookies, and stored credentials, and never copies raw backend messages into
   log-safe SDK errors;
@@ -247,7 +261,7 @@ a new operation checkpoint; they are never silently rounded.
 The adapter rejects logical `utexo` and `testnet4` networks because the gateway
 cannot negotiate or preserve those identities.
 
-The private gateway adapter now maps the existing create-UTXO prepare/complete
+The gateway adapter maps the existing create-UTXO prepare/complete
 and operation-status routes. It sends explicit defaults (`upTo: true`, 5 outputs,
 1,000 sats each); the gateway-specific supported count is 1–50 and the local
 Taproot output minimum is 330 sats. The public request type retains the broader
@@ -257,16 +271,26 @@ output plan from the PSBT; the local signer independently verifies its keys,
 scripts, count, amounts, transaction policy and fees. Only a matching successful
 completion or completed-status result can establish the actual created count.
 Pending/expired status never authorizes retry or a replacement transaction. This
-plumbing does not enable the ordinary factory or resolve backend crash recovery.
+does not resolve backend crash recovery.
 
-Only exact DTO projections are enabled. `getAddress` remains unavailable because
-the route omits index data needed for bounded local re-derivation. The fixed
-vanilla branch-0 account is known from the RN profile; searching a small window
-from zero on every unlock is not a replacement for an index/recovery contract:
-remote calls, lost responses, other devices, and restored wallets may advance
-the server beyond that window. No address is returned without local ownership
-verification. `rotateVanillaAddress` additionally requires persistent native
-reuse-mode semantics and is not an alias for another `getAddress` call.
+`onchainSend` locally decodes and validates the invoice and binds its asset,
+amount, recipient, witness BTC amount and exact endpoints to prepare/status.
+Completion must match the locally signed txid. `batchTransferIndex` is optional:
+the gateway currently omits it, so the SDK returns nil instead of inventing one.
+The existing encrypted checkpoint format remains backward-readable; a new result
+variant represents a missing batch ID, preserving legacy non-null records.
+`skipSync: true` and explicit witness blinding are rejected before preparing;
+gateway asset amounts must fit exact JSON integers, confirmations are 0...100,
+and invoice transport endpoints are 1...4. No full RGB state proof is claimed.
+
+Gateway revision `bf50f88` provides the read/receive contracts used by the SDK.
+`getAddress` and `rotateVanillaAddress` both request fresh vanilla addresses:
+this lightweight profile has no persistent reuse/pinning setting. Each response
+must carry a branch-0 BIP86 derivation index, exact path, and Taproot script;
+the SDK independently derives and compares the address, script, and path using
+its local seed. Missing attribution fails safely instead of exposing an
+unverified deposit address. Restored/high-index wallets outside the backend's
+attribution window still need backend recovery work; there is no guessed index.
 `syncWallet` and `refreshWallet` both use the gateway's combined BTC sync + RGB
 refresh operation. The gateway awaits both native operations before returning
 `{status:"ok"}`. Their `SyncResult.completedAt` is explicitly the **client-observed
@@ -275,8 +299,16 @@ or independent evidence of freshness; `tipHeight` is `nil` because the gateway
 does not provide it. Invalid acknowledgments, unexpected HTTP status, cancellation,
 and errors never fabricate success or cause automatic retries. This supersedes
 the earlier planning assumption that sync needed a backend timestamp field.
-UTXO/transfer/asset-list shapes with missing fields and public gateway RGB
-money-movement paths remain fail-closed.
+`listUnspents`, `listAssets`, `listTransfers`, `listTransfersByTxid`, and
+`listOnchainTransfers` map the available native records. Missing metadata is
+explicitly unknown: `UTXO.exists`, the three IFA supplies,
+`Transfer.batchTransferIndex`, and transfer transport endpoints are optional.
+Transfer results retain `assetID`; unavailable expiry/outpoints remain nil.
+Actual typed assignments are preserved, never derived from the ambiguous scalar
+amount. Unknown asset schemas, malformed/unsafe integers, duplicate identities,
+inconsistent assignments, and noncanonical IDs fail with a protocol error.
+Balances and allocation/history state remain server assertions, not local RGB
+state proofs. Spending still enforces all local authorization checks.
 
 The public create-UTXO count accepts 1...255, matching the native RN `u8`
 domain without wrapping; size accepts 1...UInt32.max satoshis. The gateway's
@@ -285,8 +317,12 @@ requested when funds are insufficient even with `upTo: false`; authorization
 allows 1...requested-count, but the exact prepared plan and returned **actual**
 count must agree. No-op preparation with no transaction is not fabricated as
 a successful transaction result.
-Fee estimation accepts native confirmation targets 1...1008 and rejects a
-response for a different target. Internal transaction/transfer txid filters
+Fee estimation uses `/v1/onchain/fee-estimate?blocks=...`, accepts native targets
+1...1008, and rejects a response for a different target. A slower source target
+or rate at the gateway's potentially silent 1000 sat/vB ceiling is explicitly
+unsupported; neither is presented as an adequate estimate. Returned rates are
+exact whole sat/vB, with `measuredAt=nil` because no timestamp is supplied.
+Internal transaction/transfer txid filters
 reuse complete authoritative snapshots and preserve their records and order;
 they do not synthesize history from the operation journal. A backend must
 provide a genuine unsynchronized transaction-history operation to honor
@@ -314,9 +350,11 @@ No transport retry is automatic, and no missing batch-transfer index is invented
 
 The gateway is still trusted for receive allocation/blinded-seal state and
 recipient ownership. Internal invoice consistency is not a proof that a
-malicious server returned a recipient owned by the local seed. Lower-level
-`blindReceive`/`witnessReceive` still need the backend's required batch-transfer
-index and remain unavailable. Full RGB transition validation remains a later
+malicious server returned a recipient owned by the local seed.
+`blindReceive`/`witnessReceive` use the same receive route and require its actual
+native batch-transfer index. `onchainReceive` also retains that index when
+present. Missing batch identity on a strict receive is a protocol failure after
+allocation and must not be automatically retried. Full RGB transition validation remains a later
 phase; it is not implied by local invoice parsing.
 
 The backend update `7f318a80372ae3bdc7e2f54cd6cd4b7b5d734d9d` adds durable
@@ -339,15 +377,16 @@ backend SPI without a retained local checkpoint remains unsupported. The route
 also omits `utxosCreated` and RGB `batchTransferIdx`. Actual create count can be
 derived from locally validated outputs once completion of that exact operation
 is authoritative; its missing field alone is not an independent backend blocker.
-RGB batch identity cannot be inferred from Bitcoin outputs. These operation paths
-remain unqualified and disabled; local counting is not proof of completion.
+RGB batch identity cannot be inferred from Bitcoin outputs and is now nullable.
+These operation paths are enabled but not live-deployment qualified; local
+counting is not proof of completion.
 
 Distinct stable prepare/complete idempotency keys are now confirmed by the
 backend documentation, matching this adapter's phase-separated wire keys and
 single public logical key. Atomic prepare persistence and crash-safe broadcast
 reconciliation still need backend changes. The PSBT transaction/derivation
-profile must also be aligned with `utexo.psbt.bip86.v1` and proven with real
-gateway fixtures; money movement remains default-off and local policy is unchanged.
+profile is `utexo.psbt.rgb-lib.v1`, exercised against frozen real native gateway
+preparations. Enabling it preserves local policy; it is not release certification.
 
 The ordinary factory uses the credential-provider flow above. The legacy SPI
 `bearerToken` initializer is retained for compatibility and keeps that token in

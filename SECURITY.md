@@ -16,8 +16,8 @@ Private seed/mnemonic/xpriv material is trusted and must remain local. The
 backend, transport, prepared PSBT, network data, persisted operation records,
 and all caller strings are treated as untrusted inputs.
 
-For the legacy local `sendBtc` profile (new gateway spending remains gated),
-the local core verifies before signing:
+For the legacy local `sendBtc` profile, the local core verifies before signing
+(the ordinary gateway factory selects the separate profile described below):
 
 - canonical bounded PSBTv0 and unsigned transaction version 2;
 - unique, wallet-owned BIP86 P2TR inputs with exact fingerprints and paths;
@@ -37,7 +37,7 @@ the local core verifies before signing:
 The backend result txid must match the locally validated unsigned txid before a
 terminal result is persisted or returned.
 
-The separately selected internal `utexo.psbt.rgb-lib.v1` profile does not
+The ordinary gateway factory's `utexo.psbt.rgb-lib.v1` profile does not
 reinterpret this legacy policy or its persisted intent digests. It fixes input
 and owned output derivation to the native builder's branch 0, retains version 2
 and required RBF, and bounds height-based locktime by an independently trusted
@@ -45,6 +45,14 @@ caller context. A PSBT cannot supply its own trusted height. It separately
 enforces the requested fee target against conservative signed transaction weight
 (65-byte Taproot signatures, integer fee rounding), and the app's hard absolute
 and rate caps. No arbitrary dust or percentage overpayment is authorized.
+
+New spending requires an app-owned `WalletChainContextProvider`. Its observation
+must match the selected network, be at most 300 seconds old, and be no more than
+30 seconds in the future. `observedAt` is the tip-observation time, not the block
+timestamp. Fresh context is fetched before signing and revalidation immediately
+before first submission. Missing, stale or invalid context cannot authorize a
+signature or submission; terminal replay and submitted-operation status recovery
+do not require it.
 
 Create-UTXO authorization binds the caller's defaults/count/size and every exact
 colored output path in the retained plan; vanilla change is independently
@@ -57,9 +65,10 @@ The SDK persists create/RGB operations through the same conservative state
 machine as BTC. It never terminalizes a different txid, result kind, operation
 ID or create-output count. An expired invoice or newly disabled signing
 capability is checked only before new risky transitions, never used as a reason
-to discard SUBMITTING evidence or prevent completed-result replay. The shipped
-gateway still refuses new create/RGB operations and cannot reconcile their
-incomplete current status payloads; no profile test opens those transport gates.
+to discard SUBMITTING evidence or prevent completed-result replay. BTC, create
+and fungible RGB transport are enabled. A matching completed create transaction
+supplies its count through the retained locally validated output plan; absent
+RGB batch identity remains nullable, never invented.
 
 For `sendBtc`, “vanilla-only inputs” has an exact local meaning: every input
 must carry one BIP86 origin in the vanilla external/change account, and its
@@ -86,8 +95,8 @@ otherwise acceptable Bitcoin transaction. Consequently:
 
 - `localTransactionValidation` never means chain-state validation.
 - `localRGBValidation` remains `false`.
-- RGB money-moving operations remain disabled until their trust contract is
-  explicit and versioned (or a full local RGB validation engine is added).
+- Enabled RGB money movement relies on server-side RGB validation and state.
+  Bitcoin-level validation does not make these operations trustless.
 
 ## Key custody
 
@@ -116,9 +125,10 @@ deprecated, and should not be used in new integrations.
 
 ## Backend and retry requirements
 
-The future backend must negotiate an exact supported profile and echo the
-locally computed request hash, idempotency key, network, operation ID, and
-expiry. Unsupported protocol versions and semantically invalid fields fail closed.
+The SDK binds each preparation to the original local request hash, logical
+idempotency key, network, operation kind/ID and expiry. The gateway's intent
+summary is checked against that request; it is not a substitute for local PSBT
+validation. Unsupported versions and semantically invalid fields fail closed.
 The current private JSON adapter ignores additive object keys for compatibility;
 required recovery fields, enums, types, explicit nulls, and intent allowances are
 validated. Additive keys never authorize signing or extra transaction outputs.
@@ -139,8 +149,8 @@ bytes, and SUBMITTING reconciles without preparing or
 signing again. Definitive success, rejection, and expiry outcomes are terminal
 and replay locally on subsequent same-key calls.
 
-PR #174 at `7f318a80372ae3bdc7e2f54cd6cd4b7b5d734d9d` provides a read-only
-operation-status endpoint. Its BTC completed result is accepted only against
+PR #174 at `bf50f88b7259653a18d845e0eaee8dd01ad4f799` provides a read-only
+operation-status endpoint. Its completed result is accepted only against
 the original caller request and authenticated SUBMITTING checkpoint: canonical
 operation ID, kind, recipient/amount/fee, millisecond timestamp range/order/TTL,
 stored expiry floor, retained PSBT SHA-256, and locally signed txid. Recipient
@@ -151,13 +161,15 @@ amount before storing its report. No fresh signing occurs during recovery.
 The gateway's unqueued read is not a no-broadcast proof. Both pending and expired
 states, including null txid/false `mayHaveBroadcast`, preserve SUBMITTING and
 return `operation.ambiguous`. A complete 410 `OP_EXPIRED` is treated the same way,
-not as a definitive terminal rejection. Matching completed BTC alone may become
+not as a definitive terminal rejection. Matching completed BTC/create/RGB may become
 terminal success. The SDK performs at most one recovery GET per call and never
 automatically retries complete or prepares a replacement. A missing operation,
 invalid payload, mismatching intent/txid, or failed GET cannot release the signed
-evidence. Cancellation remains cancellation and preserves that evidence. Durable
-server broadcast/recovery ordering is still a release gate; full RGB/create-UTXO
-results cannot be recovered from this endpoint's current incomplete result schema.
+evidence. Cancellation remains cancellation and preserves that evidence. Backend
+crash/TTL recovery remains a known risk, not an SDK activation gate: a broadcast
+whose identity/outcome was not recorded may remain unresolved. Enabling spending
+does not repair that server-side durability gap. RGB batch identity is nullable;
+create counts come from the exact signed plan, not the requested count.
 
 `UTEXOWallet.create` supplies this persistence automatically. CryptoKit
 AES-256-GCM authenticates the versioned snapshot against wallet/network, service,

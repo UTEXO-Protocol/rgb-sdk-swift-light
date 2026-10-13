@@ -222,12 +222,17 @@ public struct ReservedAddress: Hashable, Sendable {
     public let account: AccountKind
     public let keychain: Keychain
     public let index: UInt32
+    public let scriptPubkeyHex: String?
+    public let derivationPath: String?
 
-    public init(address: BitcoinAddress, account: AccountKind, keychain: Keychain, index: UInt32) {
+    public init(address: BitcoinAddress, account: AccountKind, keychain: Keychain, index: UInt32,
+                scriptPubkeyHex: String? = nil, derivationPath: String? = nil) {
         self.address = address
         self.account = account
         self.keychain = keychain
         self.index = index
+        self.scriptPubkeyHex = scriptPubkeyHex
+        self.derivationPath = derivationPath
     }
 }
 

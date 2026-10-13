@@ -2,6 +2,7 @@ import Foundation
 internal import UtexoLocalSignerBindings
 
 protocol LocalSigningEngine: Sendable {
+    func withGatewayContext(_ context: GatewaySigningContext) throws -> any LocalSigningEngine
     var capabilities: WalletCapabilities { get }
     func identity() throws -> WalletIdentity
     func verifyReservedAddress(_ reservation: ReservedAddress) throws
@@ -31,6 +32,9 @@ protocol LocalSigningEngine: Sendable {
 }
 
 extension LocalSigningEngine {
+    func withGatewayContext(_ context: GatewaySigningContext) throws -> any LocalSigningEngine {
+        throw SDKError.unsupported("reviewed gateway signing profile")
+    }
     func validateAndSignCreateUtxos(
         prepared: PreparedTransaction, request: CreateUtxosRequest, policy: LocalSigningPolicy
     ) throws -> LocalSigningResult { throw SDKError.unsupported("local create-UTXO authorization") }
@@ -57,7 +61,7 @@ protocol LocalSigningEngineFactory: Sendable {
 }
 
 /// Internal-only reviewed builder context. It is never inferred from a PSBT
-/// or an untrusted gateway response. No ordinary public factory selects it yet.
+/// or an untrusted gateway response.
 struct GatewaySigningContext: Sendable {
     static let profile = "utexo.psbt.rgb-lib.v1"
     let maximumBlockHeight: UInt32
@@ -72,6 +76,8 @@ struct GatewaySigningContext: Sendable {
 }
 
 struct UniFFILocalSigningEngineFactory: LocalSigningEngineFactory {
+    var gatewayProfile = false
+    var gatewaySigningAvailable = true
     func open(network: Network, seed: SecretSeed) throws -> any LocalSigningEngine {
         try open(network: network, seed: seed, gatewayContext: nil)
     }
@@ -94,7 +100,9 @@ struct UniFFILocalSigningEngineFactory: LocalSigningEngineFactory {
                     seed: data
                 )
             }
-            return NativeLocalSigningEngine(network: network, signer: signer, gatewayContext: gatewayContext)
+            return NativeLocalSigningEngine(network: network, signer: signer, gatewayContext: gatewayContext,
+                gatewayProfile: gatewayProfile || gatewayContext != nil,
+                gatewaySigningAvailable: gatewaySigningAvailable)
         } catch {
             throw mapSignerError(error)
         }
@@ -106,28 +114,38 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
         WalletCapabilities(
             localKeyDerivation: true,
             localTransactionValidation: true,
-            localTransactionSigning: true,
+            localTransactionSigning: !gatewayProfile || gatewaySigningAvailable,
             localRGBInvoiceParsing: true,
             localRGBValidation: false,
-            localSigningOperations: gatewayContext == nil
-                ? [.sendBtc] : [.sendBtc, .createUtxos, .onchainSend],
+            localSigningOperations: gatewayProfile
+                ? (gatewaySigningAvailable ? [.sendBtc, .createUtxos, .onchainSend] : []) : [.sendBtc],
             derivationProfile: WalletCapabilities.derivationProfileV1,
-            signingProfile: gatewayContext == nil
-                ? WalletCapabilities.signingProfileV1 : GatewaySigningContext.profile
+            signingProfile: gatewayProfile ? GatewaySigningContext.profile : WalletCapabilities.signingProfileV1
         )
     }
 
     private let network: Network
     private let signer: UtexoLocalSignerBindings.LocalSigner
     private let gatewayContext: GatewaySigningContext?
+    private let gatewayProfile: Bool
+    private let gatewaySigningAvailable: Bool
 
     init(
         network: Network, signer: UtexoLocalSignerBindings.LocalSigner,
-        gatewayContext: GatewaySigningContext? = nil
+        gatewayContext: GatewaySigningContext? = nil,
+        gatewayProfile: Bool = false, gatewaySigningAvailable: Bool = true
     ) {
         self.network = network
         self.signer = signer
         self.gatewayContext = gatewayContext
+        self.gatewayProfile = gatewayProfile
+        self.gatewaySigningAvailable = gatewaySigningAvailable
+    }
+
+    func withGatewayContext(_ context: GatewaySigningContext) throws -> any LocalSigningEngine {
+        guard gatewayProfile else { throw SDKError.unsupported("reviewed gateway signing profile") }
+        return NativeLocalSigningEngine(network: network, signer: signer, gatewayContext: context,
+            gatewayProfile: true, gatewaySigningAvailable: true)
     }
 
     func identity() throws -> WalletIdentity {
@@ -154,7 +172,10 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
                 keychain: reservation.keychain.ffi,
                 index: reservation.index
             )
-            guard derived.address == reservation.address.value else {
+            guard derived.address == reservation.address.value,
+                  reservation.scriptPubkeyHex.map({ $0 == derived.scriptPubkeyHex }) ?? true,
+                  // rust-bitcoin Display omits the master "m/" prefix.
+                  reservation.derivationPath.map({ $0 == "m/" + derived.derivationPath }) ?? true else {
                 throw SDKError.backendProtocolMismatch(
                     "reserved address does not match local derivation"
                 )
@@ -180,8 +201,10 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
                     psbtBase64: prepared.psbtBase64,
                     intent: gatewayIntent(intent, request: request, policy: policy, context: gatewayContext)
                 )
-            } else {
+            } else if !gatewayProfile {
                 result = try signer.signPsbt(psbtBase64: prepared.psbtBase64, intent: intent)
+            } else {
+                throw SDKError.unsupported("trusted chain context is required for gateway signing")
             }
             guard result.signedInputCount > 0 else {
                 throw SDKError.invariant("native signer returned no signatures")
@@ -216,8 +239,10 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
                     psbtBase64: prepared.psbtBase64,
                     intent: gatewayIntent(intent, request: request, policy: policy, context: gatewayContext)
                 )
-            } else {
+            } else if !gatewayProfile {
                 report = try signer.validatePsbt(psbtBase64: prepared.psbtBase64, intent: intent)
+            } else {
+                throw SDKError.unsupported("trusted chain context is required for gateway signing")
             }
             let current = try report.sdk
             guard current.matchesTransactionEvidence(retainedValidation) else {

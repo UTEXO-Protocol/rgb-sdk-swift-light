@@ -59,7 +59,7 @@ const expectedFailures = Number(summary.expectedFailures ?? 0);
 const total = Number(summary.totalTestCount ?? passed + failed + skipped + expectedFailures);
 if (
   ![passed, failed, skipped, expectedFailures, total].every(Number.isFinite)
-  || passed < 3
+  || passed < 4
   || failed !== 0
   || skipped !== 0
   || expectedFailures !== 0
@@ -84,6 +84,7 @@ const required = [
   'SDKConsumerTests/testPublicNativeDerivationAndLiteralCompatibility()',
   'SDKConsumerTests/testRealKeychainRoundTripDuplicateAndExplicitDeletion()',
   'PublicGatewayConsumerTests/testOrdinaryFactoryHTTPWorkflowRotationAndReopen()',
+  'PublicGatewayConsumerTests/testOrdinaryFactoryLocallySignsAllThreeSpendingOperations()',
 ];
 const missingOrUnpassed = required.filter((identifier) => cases.get(identifier) !== 'Passed');
 if (missingOrUnpassed.length !== 0) {

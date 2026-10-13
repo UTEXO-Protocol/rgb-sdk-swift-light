@@ -191,9 +191,10 @@ public struct OnchainSendRequest: Hashable, Sendable {
 
 public struct OnchainSendResponse: Hashable, Sendable {
     public let txid: TransactionID
-    public let batchTransferIndex: UInt64
+    /// Nil when the gateway does not expose the native batch identifier.
+    public let batchTransferIndex: UInt64?
 
-    public init(txid: TransactionID, batchTransferIndex: UInt64) {
+    public init(txid: TransactionID, batchTransferIndex: UInt64? = nil) {
         self.txid = txid
         self.batchTransferIndex = batchTransferIndex
     }

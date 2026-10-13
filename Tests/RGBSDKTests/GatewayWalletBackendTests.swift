@@ -445,7 +445,8 @@ private actor RotatingTestAPIKeyProvider: WalletAPIKeyProvider {
 @Test func gatewayPreflightKeepsMissingResultContractsDisabled() async throws {
     let backend = GatewayWalletBackend(configuration: try gatewayConfiguration())
     try await backend.preflightOperation(.createUtxos)
-    for operation in [OperationKind.onchainSend, .inflate] {
+    try await backend.preflightOperation(.onchainSend)
+    for operation in [OperationKind.inflate] {
         do {
             try await backend.preflightOperation(operation)
             Issue.record("expected unsupported gateway profile for \(operation.rawValue)")
@@ -1979,7 +1980,13 @@ private actor GatewayStubTransport: GatewayHTTPTransport {
 }
 
 private struct GatewayNeverSigner: LocalSigningEngine {
-    let capabilities = WalletCapabilities.locked
+    // This retained-checkpoint test double supports BTC revalidation; its
+    // signing entry point deliberately traps to prove no fresh signature.
+    let capabilities = WalletCapabilities(
+        localKeyDerivation: true, localTransactionValidation: true, localTransactionSigning: true,
+        localRGBInvoiceParsing: false, localRGBValidation: false, localSigningOperations: [.sendBtc],
+        derivationProfile: WalletCapabilities.derivationProfileV1,
+        signingProfile: WalletCapabilities.signingProfileV1)
 
     func identity() throws -> WalletIdentity {
         throw SDKError.invariant("unexpected identity")

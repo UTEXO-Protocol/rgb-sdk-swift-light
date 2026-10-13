@@ -186,6 +186,25 @@ import Testing
     }
 }
 
+@Test func rgbNullableBatchCompactReceiptCrossPlatformGolden() throws {
+    let fixture = try CodecFixture()
+    for batch: UInt64? in [nil, 42] {
+        let checkpoint = try OperationCheckpoint(
+            walletID: fixture.walletID, idempotencyKey: fixture.idempotencyKey,
+            requestHash: fixture.requestHash, operationKind: .onchainSend, phase: .terminal,
+            operationID: fixture.operationID, validation: fixture.validation,
+            terminalOutcome: .succeeded(.onchainSend(operationID: fixture.operationID,
+                result: .init(txid: fixture.txid, batchTransferIndex: batch))))
+        let encoded = try OperationCheckpointCodec.encode(checkpoint)
+        #expect(try OperationCheckpointCodec.decode(encoded) == checkpoint)
+        let expected = batch == nil
+            ? "VVRYT1BDSEsAAAACAAAACHdhbGxldC0xAAAADWlkZW1wb3RlbmN5LTEAAABAZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAAAAtvbmNoYWluU2VuZAAAAAh0ZXJtaW5hbAAAAAtvcGVyYXRpb24tMQEAAABAYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYgAAAEBjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjAAAAQGFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEAAAAAAABOIAAAAAAAAEo4AAAAAAAAA+gAAAAAAAAAyAAAAAAAABOIAAAAAAAAJxAAAAAAAAAjKAAAAAEAAAACAAAAAAEEAAAAC29wZXJhdGlvbi0xAAAAQGFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWGagJla0qZuVqvoR6VpKk/CXm9p5ymGGEOCuHkhlnPn2A=="
+            : "VVRYT1BDSEsAAAACAAAACHdhbGxldC0xAAAADWlkZW1wb3RlbmN5LTEAAABAZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAAAAtvbmNoYWluU2VuZAAAAAh0ZXJtaW5hbAAAAAtvcGVyYXRpb24tMQEAAABAYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYgAAAEBjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjAAAAQGFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEAAAAAAABOIAAAAAAAAEo4AAAAAAAAA+gAAAAAAAAAyAAAAAAAABOIAAAAAAAAJxAAAAAAAAAjKAAAAAEAAAACAAAAAAEDAAAAC29wZXJhdGlvbi0xAAAAQGFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEAAAAAAAAAKjT+IIi8IAUBHN/sRLUZvDApVJe4Ke8hsmz0wturCGHl"
+        #expect(encoded.base64EncodedString() == expected)
+        #expect(try OperationCheckpointCodec.decode(Data(base64Encoded: expected)!) == checkpoint)
+    }
+}
+
 private struct CodecFixture {
     let walletID: WalletID
     let idempotencyKey: IdempotencyKey

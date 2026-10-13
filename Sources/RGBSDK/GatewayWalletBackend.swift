@@ -23,6 +23,8 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
     public let maximumResponseBytes: Int
 
     fileprivate let apiKeyProvider: any WalletAPIKeyProvider
+    fileprivate let chainContextProvider: (any WalletChainContextProvider)?
+    fileprivate let requiresApplicationChainContext: Bool
 
     /// Creates a pinned gateway configuration.
     ///
@@ -36,7 +38,9 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
         allowUnverifiedPsbtProfile: Bool = false,
         requestTimeout: TimeInterval = 30,
         maximumPreparationTTL: TimeInterval = 3_600,
-        maximumResponseBytes: Int = 1_048_576
+        maximumResponseBytes: Int = 1_048_576,
+        chainContextProvider: (any WalletChainContextProvider)? = nil,
+        requiresApplicationChainContext: Bool = false
     ) throws {
         guard !bearerToken.isEmpty, bearerToken.utf8.count <= 512,
               bearerToken.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7f }) else {
@@ -46,7 +50,9 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
             baseURL: baseURL, apiKeyProvider: LegacyStaticAPIKeyProvider(token: bearerToken),
             network: network, allowInsecureLocalDevelopment: allowInsecureLocalDevelopment,
             allowUnverifiedPsbtProfile: allowUnverifiedPsbtProfile, requestTimeout: requestTimeout,
-            maximumPreparationTTL: maximumPreparationTTL, maximumResponseBytes: maximumResponseBytes
+            maximumPreparationTTL: maximumPreparationTTL, maximumResponseBytes: maximumResponseBytes,
+            chainContextProvider: chainContextProvider,
+            requiresApplicationChainContext: requiresApplicationChainContext
         )
     }
 
@@ -58,7 +64,9 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
         allowUnverifiedPsbtProfile: Bool = false,
         requestTimeout: TimeInterval = 30,
         maximumPreparationTTL: TimeInterval = 3_600,
-        maximumResponseBytes: Int = 1_048_576
+        maximumResponseBytes: Int = 1_048_576,
+        chainContextProvider: (any WalletChainContextProvider)? = nil,
+        requiresApplicationChainContext: Bool = false
     ) throws {
         guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(),
@@ -121,6 +129,8 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
         self.requestTimeout = requestTimeout
         self.maximumPreparationTTL = maximumPreparationTTL
         self.maximumResponseBytes = maximumResponseBytes
+        self.chainContextProvider = chainContextProvider
+        self.requiresApplicationChainContext = requiresApplicationChainContext
     }
 
     public var description: String {
@@ -152,7 +162,7 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
 public actor GatewayWalletBackend: WalletBackend {
     private static let apiVersion: UInt32 = 1
     private static let maximumRequestBytes = 64 * 1_024
-    fileprivate static let javascriptMaximumSafeInteger: UInt64 = 9_007_199_254_740_991
+    static let javascriptMaximumSafeInteger: UInt64 = 9_007_199_254_740_991
 
     private let configuration: GatewayBackendConfiguration
     private let transport: any GatewayHTTPTransport
@@ -163,6 +173,32 @@ public actor GatewayWalletBackend: WalletBackend {
     private var boundWalletID: WalletID?
     private var boundGatewayUserID: String?
     private var validatedCredentialDigest: Data?
+
+    nonisolated var hasApplicationChainContextProvider: Bool {
+        configuration.chainContextProvider != nil
+    }
+
+    func signingEngineWithFreshContext(_ signer: any LocalSigningEngine) async throws -> any LocalSigningEngine {
+        guard configuration.requiresApplicationChainContext else { return signer }
+        guard let provider = configuration.chainContextProvider else {
+            throw SDKError.unsupported("configure chainContextProvider for local gateway signing")
+        }
+        let context: WalletChainContext
+        do { context = try await provider.loadChainContext(network: configuration.network) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw SDKError.policyRejected("trusted chain context is unavailable") }
+        try Task.checkCancellation()
+        let now = try nowMilliseconds() / 1_000
+        guard context.network == configuration.network else {
+            throw SDKError.wrongNetwork(expected: configuration.network, actual: context.network)
+        }
+        guard context.tipHeight < 500_000_000,
+              context.observedAt.rawValue <= now || context.observedAt.rawValue - now <= 30,
+              context.observedAt.rawValue >= now || now - context.observedAt.rawValue <= 300 else {
+            throw SDKError.policyRejected("trusted chain context has the wrong network or is not fresh")
+        }
+        return try signer.withGatewayContext(.init(maximumBlockHeight: context.tipHeight))
+    }
 
     public init(configuration: GatewayBackendConfiguration) {
         self.configuration = configuration
@@ -358,6 +394,128 @@ public actor GatewayWalletBackend: WalletBackend {
         return try match.balance.asset
     }
 
+    public func reserveAddress(_ request: ReserveAddressRequest) async throws -> ReservedAddress {
+        try requireContext(request.context)
+        guard request.account == .vanilla else {
+            throw SDKError.unsupported("gateway address allocation supports the vanilla account only")
+        }
+        // Both methods allocate fresh addresses in the lightweight gateway.
+        // Never synthesize a persistent pin/reuse policy on this client.
+        let wire: GatewayAddressWire = try await get(path: "/v1/wallet/address")
+        try Task.checkCancellation()
+        try requireContext(request.context)
+        return try gatewayMapped {
+            guard let derivation = wire.derivation,
+                  derivation.account == "vanilla", derivation.keychain == 0,
+                  derivation.index < 0x8000_0000,
+                  derivation.scriptHex.count == 68, derivation.scriptHex.hasPrefix("5120"),
+                  derivation.scriptHex == derivation.scriptHex.lowercased(),
+                  isBoundedEvenHex(derivation.scriptHex, maximumBytes: 34) else {
+                throw SDKError.backendProtocolMismatch("gateway address has no valid derivation evidence")
+            }
+            let coin = configuration.network == .mainnet ? 0 : 1
+            guard derivation.derivationPath == "m/86'/\(coin)'/0'/0/\(derivation.index)" else {
+                throw SDKError.backendProtocolMismatch("gateway address derivation path differs from the wallet profile")
+            }
+            let address = try BitcoinAddress(wire.address)
+            guard address.value == wire.address else {
+                throw SDKError.backendProtocolMismatch("gateway returned a noncanonical address")
+            }
+            // UTEXOWallet independently derives this address AND script locally.
+            return ReservedAddress(address: address, account: .vanilla, keychain: .external,
+                index: derivation.index, scriptPubkeyHex: derivation.scriptHex,
+                derivationPath: derivation.derivationPath)
+        }
+    }
+
+    public func estimateFeeRate(context: BackendContext, targetBlocks: BlockCount) async throws -> FeeEstimate {
+        try requireContext(context)
+        guard (1...1_008).contains(targetBlocks.rawValue) else {
+            throw SDKError.invalidArgument("blocks", "must be between 1 and 1008")
+        }
+        let wire: GatewayFeeWire = try await get(path: "/v1/onchain/fee-estimate?blocks=\(targetBlocks.rawValue)")
+        try Task.checkCancellation()
+        try requireContext(context)
+        guard wire.blocks == targetBlocks.rawValue, (1...1_008).contains(wire.sourceBlocks),
+              (1...1_000).contains(wire.feeRateSatPerVb) else {
+            throw SDKError.backendProtocolMismatch("gateway returned an invalid fee estimate")
+        }
+        guard wire.sourceBlocks <= wire.blocks else {
+            throw SDKError.unsupported("gateway cannot estimate the requested confirmation target")
+        }
+        // 1000 is also the service's silent cap. Without the uncapped value we
+        // cannot label it as an adequate estimate for the requested target.
+        guard wire.feeRateSatPerVb < 1_000 else {
+            throw SDKError.unsupported("gateway fee estimate may have been capped at 1000 sat/vB")
+        }
+        return try FeeEstimate(feeRate: FeeRate(milliSatsPerVByte: wire.feeRateSatPerVb * 1_000),
+            targetBlocks: targetBlocks, measuredAt: nil)
+    }
+
+    public func listUnspents(context: BackendContext) async throws -> [Unspent] {
+        try requireContext(context)
+        let wire: GatewayUnspentsWire = try await get(path: "/v1/wallet/unspents")
+        try Task.checkCancellation()
+        try requireContext(context)
+        return try gatewayMapped {
+            let result = try wire.unspents.map { try $0.model() }
+            guard Set(result.map(\.utxo.outpoint)).count == result.count else {
+                throw SDKError.backendProtocolMismatch("gateway repeated an unspent outpoint")
+            }
+            return result
+        }
+    }
+
+    public func listAssets(context: BackendContext) async throws -> ListAssets {
+        try requireContext(context)
+        let wire: GatewayAssetsWire = try await get(path: "/v1/wallet/balances")
+        try Task.checkCancellation()
+        try requireContext(context)
+        return try gatewayMapped { try wire.model() }
+    }
+
+    public func listTransfers(context: BackendContext, assetID: AssetID?) async throws -> [Transfer] {
+        try requireContext(context)
+        var route = URLComponents()
+        route.path = "/v1/wallet/transfers"
+        if let assetID { route.queryItems = [URLQueryItem(name: "assetId", value: assetID.value)] }
+        // Fastify treats '+' as a form-encoded space; URLComponents does not.
+        route.percentEncodedQuery = route.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let path = route.string else { throw SDKError.invariant("invalid transfer route") }
+        let wire: GatewayTransfersWire = try await get(path: path)
+        try Task.checkCancellation()
+        try requireContext(context)
+        return try gatewayMapped {
+            let result = try wire.transfers.map { try $0.model() }
+            guard assetID == nil || result.allSatisfy({ $0.assetID == assetID }) else {
+                throw SDKError.backendProtocolMismatch("gateway returned transfers for another asset")
+            }
+            guard Set(result.map(\.index)).count == result.count else {
+                throw SDKError.backendProtocolMismatch("gateway repeated a transfer index")
+            }
+            return result
+        }
+    }
+
+    public func blindReceive(context: BackendContext, request: InvoiceRequest) async throws -> InvoiceReceiveData {
+        try await receiveWithBatch(context: context, request: request, witness: false)
+    }
+
+    public func witnessReceive(context: BackendContext, request: InvoiceRequest) async throws -> InvoiceReceiveData {
+        try await receiveWithBatch(context: context, request: request, witness: true)
+    }
+
+    private func receiveWithBatch(context: BackendContext, request: InvoiceRequest, witness: Bool) async throws -> InvoiceReceiveData {
+        let result = try await onchainReceive(context: context, request: OnchainReceiveRequest(
+            amount: request.amount, assetID: request.assetID, minConfirmations: request.minConfirmations,
+            duration: request.duration, witness: witness))
+        guard let batch = result.batchTransferIndex, let recipient = result.recipientID else {
+            throw SDKError.backendProtocolMismatch("gateway receive omitted native batch identity; do not automatically retry receive creation")
+        }
+        return try InvoiceReceiveData(invoice: result.invoice, recipientID: recipient,
+            expirationTimestamp: result.expirationTimestamp, batchTransferIndex: batch)
+    }
+
     public func syncWallet(context: BackendContext) async throws -> SyncResult {
         try requireContext(context)
         // The gateway awaits BTC sync AND RGB refresh before returning this
@@ -426,8 +584,11 @@ public actor GatewayWalletBackend: WalletBackend {
             }
             let response = try OnchainReceiveResponse(
                 invoice: invoice, recipientID: wire.recipientId,
-                expirationTimestamp: wire.expirationTimestamp.map { .init(rawValue: $0) }
+                expirationTimestamp: wire.expirationTimestamp.map { .init(rawValue: $0) },
+                batchTransferIndex: wire.batchTransferIdx
             )
+            try gatewaySafeInteger(wire.expirationTimestamp)
+            try gatewaySafeInteger(wire.batchTransferIdx)
             guard response.recipientID == wire.recipientId else {
                 throw SDKError.backendProtocolMismatch("gateway returned a noncanonical recipient")
             }
@@ -495,8 +656,20 @@ public actor GatewayWalletBackend: WalletBackend {
             guard !value.skipSync else {
                 throw SDKError.unsupported("PR #174 gateway createUtxos skipSync=true")
             }
-        case .onchainSend:
-            throw SDKError.unsupported("PR #174 gateway onchainSend result contract")
+        case .onchainSend(let value):
+            guard let amount = UInt64(value.amount.decimal), amount <= Self.javascriptMaximumSafeInteger else {
+                throw SDKError.invalidArgument("amount", "exceeds the gateway exact integer range")
+            }
+            guard !value.skipSync else { throw SDKError.unsupported("PR #174 gateway onchainSend skipSync=true") }
+            guard value.witnessData?.blinding == nil else {
+                throw SDKError.unsupported("PR #174 gateway witness blinding")
+            }
+            guard value.minConfirmations.rawValue <= 100 else {
+                throw SDKError.invalidArgument("minConfirmations", "gateway supports at most 100")
+            }
+            if let witness = value.witnessData, witness.amountSat.value < 294 {
+                throw SDKError.invalidArgument("witnessData", "gateway requires at least 294 satoshis")
+            }
         }
     }
 
@@ -573,6 +746,76 @@ public actor GatewayWalletBackend: WalletBackend {
               upTo: request.upTo, feeRateSatPerVb: try gatewayFeeRate(request.feeRate))
     }
 
+    public func prepareOnchainSend(_ request: PrepareOnchainSendRequest) async throws -> PreparedTransaction {
+        try requireUnverifiedPsbtProfileOptIn()
+        try requireContext(request.context.backend)
+        try validateRequest(.onchainSend(request.request))
+        let body = try assetBody(request.request, validateExpiry: true)
+        let response: PreparedResponse = try await post(
+            path: "/v1/onchain/send-asset/prepare", body: body, expectedStatusCode: 201,
+            idempotency: .init(logicalKey: request.context.idempotencyKey, stage: .prepare))
+        try Task.checkCancellation()
+        try requireContext(request.context.backend)
+        try validateAssetIntent(response.intent, request: body)
+        return try makePrepared(response, context: request.context, operation: .onchainSend)
+    }
+
+    private func assetBody(_ request: OnchainSendRequest, validateExpiry: Bool) throws -> PrepareSendAssetBody {
+        // Recovery must not reject the original intent simply because its
+        // invoice has expired since the already-signed submission.
+        let invoice = try validateOutgoingRGBInvoice(request, network: configuration.network,
+            now: validateExpiry ? nowMilliseconds() / 1_000 : 0)
+        guard let assetID = request.assetID ?? invoice.assetID,
+              let amount = UInt64(request.amount.decimal), amount <= Self.javascriptMaximumSafeInteger,
+              (1...4).contains(invoice.transportEndpoints.count),
+              invoice.transportEndpoints.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 2_048 }) else {
+            throw SDKError.invalidArgument("invoice", "exceeds the gateway asset or transport domain")
+        }
+        return .init(assetId: assetID.value, amount: amount, recipientId: invoice.recipientID,
+            witnessAmountSat: request.witnessData?.amountSat.value,
+            transportEndpoints: invoice.transportEndpoints, donation: request.donation,
+            minConfirmations: request.minConfirmations.rawValue,
+            feeRateSatPerVb: try gatewayFeeRate(request.feeRate))
+    }
+
+    private func validateAssetIntent(_ intent: PreparedIntent, request: PrepareSendAssetBody) throws {
+        guard intent.kind == "send_asset", intent.recipients.isEmpty, intent.utxos == nil,
+              intent.feeRateSatPerVb == request.feeRateSatPerVb, let asset = intent.asset,
+              asset.assetId == request.assetId, asset.amount == request.amount,
+              asset.recipientId == request.recipientId, asset.witnessAmountSat == request.witnessAmountSat,
+              asset.transportEndpoints == request.transportEndpoints else {
+            throw SDKError.backendProtocolMismatch("prepare intent changed the requested RGB recipient, asset or amount")
+        }
+    }
+
+    func submitOnchainSend(
+        _ request: SignedTransactionSubmission, prepared: PreparedTransaction
+    ) async throws -> BackendOperationResult {
+        try requireUnverifiedPsbtProfileOptIn()
+        try requireContext(request.context.backend)
+        guard prepared.operation == .onchainSend, prepared.operationID == request.operationID,
+              prepared.idempotencyKey == request.context.idempotencyKey,
+              prepared.requestHash == request.context.requestHash,
+              prepared.network == request.context.backend.network,
+              prepared.createUtxosOutputPlan == nil else {
+            throw SDKError.backendProtocolMismatch("RGB submission differs from retained preparation")
+        }
+        try validateCanonicalBase64(request.signedPsbtBase64, field: "signed PSBT")
+        let response: CompleteResponse = try await post(
+            path: "/v1/onchain/send-asset/complete",
+            body: CompleteBody(opId: request.operationID.value, signedPsbt: request.signedPsbtBase64),
+            expectedStatusCode: 200,
+            idempotency: .init(logicalKey: request.context.idempotencyKey, stage: .complete),
+            phase: .submit(request.operationID))
+        guard let txid = try? TransactionID(response.txid), response.txid == txid.hex,
+              txid == request.validation.unsignedTxid,
+              response.batchTransferIdx.map({ $0 <= Self.javascriptMaximumSafeInteger }) ?? true else {
+            throw SDKError.operationAmbiguous(request.operationID)
+        }
+        return .onchainSend(operationID: request.operationID,
+            result: .init(txid: txid, batchTransferIndex: response.batchTransferIdx))
+    }
+
     private func extractCreateOutputPlan(_ psbt: String) throws -> CreateUtxosOutputPlan {
         try validateCanonicalBase64(psbt, field: "prepared PSBT")
         do {
@@ -599,7 +842,9 @@ public actor GatewayWalletBackend: WalletBackend {
               utxos.num == request.num, utxos.size == request.size, utxos.upTo == request.upTo else {
             throw SDKError.backendProtocolMismatch("prepare intent changed the requested create options")
         }
-        _ = intent.asset
+        guard intent.asset == nil else {
+            throw SDKError.backendProtocolMismatch("create intent contains RGB allowances")
+        }
     }
 
     func submitCreateUtxos(
@@ -683,7 +928,7 @@ public actor GatewayWalletBackend: WalletBackend {
 
     /// Read-only recovery for the status contract added in PR #174 (7f318a8).
     /// Never signs, retries complete, prepares a replacement, or weakens the
-    /// new-operation profile gate. Only a matching completed BTC/create result can
+    /// new-operation profile gate. Only a matching completed BTC/create/RGB result can
     /// advance the journal to terminal state.
     func getOperationForRecovery(
         context: BackendContext,
@@ -699,6 +944,12 @@ public actor GatewayWalletBackend: WalletBackend {
         request: CreateUtxosRequest
     ) async throws -> BackendOperationStatus {
         try await recoverOperation(context: context, checkpoint: checkpoint, request: .createUtxos(request))
+    }
+
+    func getOperationForRecovery(
+        context: BackendContext, checkpoint: OperationCheckpoint, request: OnchainSendRequest
+    ) async throws -> BackendOperationStatus {
+        try await recoverOperation(context: context, checkpoint: checkpoint, request: .onchainSend(request))
     }
 
     private func recoverOperation(
@@ -734,7 +985,7 @@ public actor GatewayWalletBackend: WalletBackend {
         )
         try Task.checkCancellation()
         try requireContext(context)
-        let wireKind = request.kind == .sendBtc ? "send_btc" : "create_utxos"
+        let wireKind = request.kind == .sendBtc ? "send_btc" : request.kind == .createUtxos ? "create_utxos" : "send_asset"
         guard try gatewayOperationID(response.opId) == operationID, response.kind == wireKind else {
             throw SDKError.backendProtocolMismatch("operation status changed its identity or kind")
         }
@@ -752,8 +1003,8 @@ public actor GatewayWalletBackend: WalletBackend {
                 throw SDKError.backendProtocolMismatch("retained create plan differs from its PSBT")
             }
             try request.verifyPreparedPlan(prepared, policy: .default)
-        case .onchainSend:
-            throw SDKError.unsupported("gateway RGB recovery requires a durable batch result")
+        case .onchainSend(let value):
+            try validateAssetIntent(response.intent, request: assetBody(value, validateExpiry: false))
         }
         // These are JS millisecond integers, not local seconds. Compare the
         // stored conservative floor, without imposing current expiry: an old
@@ -792,6 +1043,12 @@ public actor GatewayWalletBackend: WalletBackend {
                 // validated retained plan supplies the exact count.
                 result = .createUtxos(operationID: operationID,
                     result: .init(txid: txid, createdUtxoCount: UInt16(count)))
+            } else if request.kind == .onchainSend {
+                guard response.batchTransferIdx.map({ $0 <= Self.javascriptMaximumSafeInteger }) ?? true else {
+                    throw SDKError.backendProtocolMismatch("operation status contains an invalid batch index")
+                }
+                result = .onchainSend(operationID: operationID,
+                    result: .init(txid: txid, batchTransferIndex: response.batchTransferIdx))
             } else {
                 result = .sendBtc(operationID: operationID, txid: txid)
             }
@@ -805,9 +1062,9 @@ public actor GatewayWalletBackend: WalletBackend {
 
     public func preflightOperation(_ operation: OperationKind) async throws {
         switch operation {
-        case .sendBtc, .createUtxos:
+        case .sendBtc, .createUtxos, .onchainSend:
             try requireUnverifiedPsbtProfileOptIn()
-        case .onchainSend, .inflate:
+        case .inflate:
             throw SDKError.unsupported(
                 "PR #174 gateway \(operation.rawValue) operation profile"
             )
@@ -855,7 +1112,9 @@ public actor GatewayWalletBackend: WalletBackend {
         }
         // Required NullOnly fields prove the server did not smuggle an RGB or
         // create-utxos allowance into a send-BTC intent.
-        _ = intent.asset
+        guard intent.asset == nil else {
+            throw SDKError.backendProtocolMismatch("Bitcoin intent contains RGB allowances")
+        }
         guard intent.utxos == nil else {
             throw SDKError.backendProtocolMismatch("Bitcoin intent contains create output allowances")
         }
@@ -928,7 +1187,10 @@ public actor GatewayWalletBackend: WalletBackend {
         context: GatewayFailureContext
     ) async throws -> Response {
         guard path.hasPrefix("/"),
-              let url = URL(string: path, relativeTo: configuration.baseURL)?.absoluteURL else {
+              let url = URL(string: path, relativeTo: configuration.baseURL)?.absoluteURL,
+              url.scheme == configuration.baseURL.scheme, url.host == configuration.baseURL.host,
+              url.port == configuration.baseURL.port, url.user == nil, url.password == nil,
+              url.fragment == nil else {
             throw SDKError.invariant("gateway route is invalid")
         }
         let credential: WalletAPIKey
@@ -1225,13 +1487,15 @@ private struct WalletReceiveResponse: Decodable {
     let recipientId: String
     let expirationTimestamp: UInt64?
     let mode: String
+    let batchTransferIdx: UInt64?
 
-    private enum CodingKeys: String, CodingKey { case invoice, recipientId, expirationTimestamp, mode }
+    private enum CodingKeys: String, CodingKey { case invoice, recipientId, expirationTimestamp, mode, batchTransferIdx }
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         invoice = try container.decode(String.self, forKey: .invoice)
         recipientId = try container.decode(String.self, forKey: .recipientId)
         mode = try container.decode(String.self, forKey: .mode)
+        batchTransferIdx = try container.decodeIfPresent(UInt64.self, forKey: .batchTransferIdx)
         // The gateway schema requires this key, but permits an explicit null.
         // The invoice's independently decoded expiry remains mandatory.
         guard container.contains(.expirationTimestamp) else {
@@ -1306,6 +1570,17 @@ private struct PrepareCreateUtxosBody: Encodable {
     let feeRateSatPerVb: UInt64
 }
 
+private struct PrepareSendAssetBody: Encodable {
+    let assetId: String
+    let amount: UInt64
+    let recipientId: String
+    let witnessAmountSat: UInt64?
+    let transportEndpoints: [String]
+    let donation: Bool
+    let minConfirmations: UInt32
+    let feeRateSatPerVb: UInt64
+}
+
 private struct PreparedResponse: Decodable {
     let opId: String
     let psbt: String
@@ -1323,9 +1598,10 @@ private struct OperationStatusResponse: Decodable {
     let intent: PreparedIntent
     let createdAt: UInt64
     let expiresAt: UInt64
+    let batchTransferIdx: UInt64?
 
     private enum CodingKeys: String, CodingKey {
-        case opId, kind, state, txid, mayHaveBroadcast, intent, createdAt, expiresAt
+        case opId, kind, state, txid, mayHaveBroadcast, intent, createdAt, expiresAt, batchTransferIdx
     }
 
     init(from decoder: any Decoder) throws {
@@ -1339,6 +1615,7 @@ private struct OperationStatusResponse: Decodable {
         intent = try container.decode(PreparedIntent.self, forKey: .intent)
         createdAt = try container.decode(UInt64.self, forKey: .createdAt)
         expiresAt = try container.decode(UInt64.self, forKey: .expiresAt)
+        batchTransferIdx = try container.decodeIfPresent(UInt64.self, forKey: .batchTransferIdx)
     }
 }
 
@@ -1346,7 +1623,7 @@ private struct PreparedIntent: Decodable {
     let kind: String
     let feeRateSatPerVb: UInt64
     let recipients: [PreparedRecipient]
-    let asset: NullOnly
+    let asset: AssetIntent?
     let utxos: CreateIntent?
 
     private enum CodingKeys: String, CodingKey { case kind, feeRateSatPerVb, recipients, asset, utxos }
@@ -1355,9 +1632,28 @@ private struct PreparedIntent: Decodable {
         kind = try container.decode(String.self, forKey: .kind)
         feeRateSatPerVb = try container.decode(UInt64.self, forKey: .feeRateSatPerVb)
         recipients = try container.decode([PreparedRecipient].self, forKey: .recipients)
-        asset = try container.decode(NullOnly.self, forKey: .asset)
+        asset = try container.decode(AssetIntent?.self, forKey: .asset)
         // A missing required field is not equivalent to explicit null.
         utxos = try container.decode(CreateIntent?.self, forKey: .utxos)
+    }
+}
+
+private struct AssetIntent: Decodable {
+    let assetId: String
+    let amount: UInt64
+    let recipientId: String
+    let witnessAmountSat: UInt64?
+    let transportEndpoints: [String]
+    private enum CodingKeys: String, CodingKey {
+        case assetId, amount, recipientId, witnessAmountSat, transportEndpoints
+    }
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        assetId = try container.decode(String.self, forKey: .assetId)
+        amount = try container.decode(UInt64.self, forKey: .amount)
+        recipientId = try container.decode(String.self, forKey: .recipientId)
+        witnessAmountSat = try container.decode(UInt64?.self, forKey: .witnessAmountSat)
+        transportEndpoints = try container.decode([String].self, forKey: .transportEndpoints)
     }
 }
 
@@ -1392,6 +1688,7 @@ private struct CompleteBody: Encodable {
 
 private struct CompleteResponse: Decodable {
     let txid: String
+    let batchTransferIdx: UInt64?
 }
 
 private struct CreateCompleteResponse: Decodable {

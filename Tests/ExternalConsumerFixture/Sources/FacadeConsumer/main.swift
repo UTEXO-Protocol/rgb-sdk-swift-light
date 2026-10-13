@@ -33,3 +33,26 @@ func makeWallet(directory: URL) async throws -> UTEXOWallet {
     precondition(invoice.value == "rgb:external-consumer")
     return wallet
 }
+
+// Keep the current lightweight unknown-metadata contract visible through only
+// the shipping facade; no generated/private module is imported by consumers.
+func readWallet(_ wallet: UTEXOWallet) async throws {
+    _ = try await wallet.getAddress()
+    _ = try await wallet.rotateVanillaAddress()
+    for unspent in try await wallet.listUnspents() {
+        let exists: Bool? = unspent.utxo.exists
+        _ = exists
+    }
+    for asset in try await wallet.listAssets().ifa {
+        let supplies: [AssetAmount?] = [asset.initialSupply, asset.maximumSupply, asset.knownCirculatingSupply]
+        _ = supplies
+    }
+    for transfer in try await wallet.listTransfers() {
+        let batch: UInt64? = transfer.batchTransferIndex
+        let transports: [TransferTransportEndpoint]? = transfer.transportEndpoints
+        _ = (batch, transports, transfer.assetID)
+    }
+    _ = try await wallet.estimateFeeRate(blocks: .init(rawValue: 6))
+    _ = try await wallet.blindReceive(InvoiceRequest())
+    _ = try await wallet.witnessReceive(InvoiceRequest())
+}

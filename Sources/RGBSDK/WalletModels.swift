@@ -88,10 +88,11 @@ public struct UTXO: Hashable, Sendable {
     public let outpoint: Outpoint
     public let btcAmount: Satoshis
     public let colorable: Bool
-    /// Authoritative backend state; it is not synthesized by the facade.
-    public let exists: Bool
+    /// Authoritative backend state, or nil when the service does not expose it.
+    /// Unknown must never be treated as proof that an output exists or is spendable.
+    public let exists: Bool?
 
-    public init(outpoint: Outpoint, btcAmount: Satoshis, colorable: Bool, exists: Bool) {
+    public init(outpoint: Outpoint, btcAmount: Satoshis, colorable: Bool, exists: Bool? = nil) {
         self.outpoint = outpoint
         self.btcAmount = btcAmount
         self.colorable = colorable
@@ -228,7 +229,9 @@ public struct TransferStatus: RawRepresentable, Hashable, Sendable {
 
 public struct Transfer: Hashable, Sendable {
     public let index: UInt64
-    public let batchTransferIndex: UInt64
+    /// Nil when the gateway cannot provide the native batch identity.
+    public let batchTransferIndex: UInt64?
+    public let assetID: AssetID?
     public let createdAt: UnixSeconds
     public let updatedAt: UnixSeconds
     public let status: TransferStatus
@@ -240,12 +243,13 @@ public struct Transfer: Hashable, Sendable {
     public let receiveUTXO: Outpoint?
     public let changeUTXO: Outpoint?
     public let expiration: UnixSeconds?
-    public let transportEndpoints: [TransferTransportEndpoint]
+    /// Nil means unavailable; an empty array means the backend explicitly returned none.
+    public let transportEndpoints: [TransferTransportEndpoint]?
     public let invoice: RGBInvoice?
 
     public init(
         index: UInt64,
-        batchTransferIndex: UInt64,
+        batchTransferIndex: UInt64?,
         createdAt: UnixSeconds,
         updatedAt: UnixSeconds,
         status: TransferStatus,
@@ -257,11 +261,13 @@ public struct Transfer: Hashable, Sendable {
         receiveUTXO: Outpoint? = nil,
         changeUTXO: Outpoint? = nil,
         expiration: UnixSeconds? = nil,
-        transportEndpoints: [TransferTransportEndpoint] = [],
-        invoice: RGBInvoice? = nil
+        transportEndpoints: [TransferTransportEndpoint]? = nil,
+        invoice: RGBInvoice? = nil,
+        assetID: AssetID? = nil
     ) {
         self.index = index
         self.batchTransferIndex = batchTransferIndex
+        self.assetID = assetID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.status = status
@@ -334,7 +340,7 @@ public struct AssetNIA: Hashable, Sendable {
         guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
         self.assetID = assetID
         self.ticker = try requireBoundedText(ticker, field: "ticker", maximumUTF8Bytes: 16)
-        self.name = try requireBoundedText(name, field: "name", maximumUTF8Bytes: 256)
+        self.name = try requireBoundedDisplayText(name, field: "name", maximumUTF8Bytes: 256)
         self.precision = precision
         self.issuedSupply = issuedSupply
         self.timestamp = timestamp
@@ -350,9 +356,10 @@ public struct AssetIFA: Hashable, Sendable {
     public let ticker: String
     public let name: String
     public let precision: UInt8
-    public let initialSupply: AssetAmount
-    public let maximumSupply: AssetAmount
-    public let knownCirculatingSupply: AssetAmount
+    /// Supply metadata is nil when it is not exposed by the gateway.
+    public let initialSupply: AssetAmount?
+    public let maximumSupply: AssetAmount?
+    public let knownCirculatingSupply: AssetAmount?
     public let timestamp: UnixSeconds
     public let addedAt: UnixSeconds
     public let balance: AssetBalance
@@ -365,9 +372,9 @@ public struct AssetIFA: Hashable, Sendable {
         ticker: String,
         name: String,
         precision: UInt8,
-        initialSupply: AssetAmount,
-        maximumSupply: AssetAmount,
-        knownCirculatingSupply: AssetAmount,
+        initialSupply: AssetAmount?,
+        maximumSupply: AssetAmount?,
+        knownCirculatingSupply: AssetAmount?,
         timestamp: UnixSeconds,
         addedAt: UnixSeconds,
         balance: AssetBalance,
@@ -376,12 +383,15 @@ public struct AssetIFA: Hashable, Sendable {
         rejectListURL: URL? = nil
     ) throws {
         guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
-        guard initialSupply <= maximumSupply, knownCirculatingSupply <= maximumSupply else {
-            throw SDKError.invalidArgument("supply", "must not exceed maximumSupply")
+        if let maximumSupply {
+            guard initialSupply.map({ $0 <= maximumSupply }) ?? true,
+                  knownCirculatingSupply.map({ $0 <= maximumSupply }) ?? true else {
+                throw SDKError.invalidArgument("supply", "must not exceed maximumSupply")
+            }
         }
         self.assetID = assetID
         self.ticker = try requireBoundedText(ticker, field: "ticker", maximumUTF8Bytes: 16)
-        self.name = try requireBoundedText(name, field: "name", maximumUTF8Bytes: 256)
+        self.name = try requireBoundedDisplayText(name, field: "name", maximumUTF8Bytes: 256)
         self.precision = precision
         self.initialSupply = initialSupply
         self.maximumSupply = maximumSupply
@@ -419,7 +429,7 @@ public struct AssetCFA: Hashable, Sendable {
     ) throws {
         guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
         self.assetID = assetID
-        self.name = try requireBoundedText(name, field: "name", maximumUTF8Bytes: 256)
+        self.name = try requireBoundedDisplayText(name, field: "name", maximumUTF8Bytes: 256)
         self.precision = precision
         self.issuedSupply = issuedSupply
         self.timestamp = timestamp
@@ -453,7 +463,7 @@ public struct AssetUDA: Hashable, Sendable {
         guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
         self.assetID = assetID
         self.ticker = try requireBoundedText(ticker, field: "ticker", maximumUTF8Bytes: 16)
-        self.name = try requireBoundedText(name, field: "name", maximumUTF8Bytes: 256)
+        self.name = try requireBoundedDisplayText(name, field: "name", maximumUTF8Bytes: 256)
         self.precision = precision
         self.timestamp = timestamp
         self.addedAt = addedAt

@@ -198,10 +198,12 @@ private struct CheckpointWriter {
             try append(result.txid.hex, maximumBytes: 64)
             append(UInt32(result.createdUtxoCount))
         case let .onchainSend(operationID, result):
-            append(UInt8(3))
+            // Preserve v1's discriminator 3 + concrete u64 byte-for-byte.
+            // The additive discriminator 4 represents an honestly absent ID.
+            append(UInt8(result.batchTransferIndex == nil ? 4 : 3))
             try append(operationID.value, maximumBytes: 128)
             try append(result.txid.hex, maximumBytes: 64)
-            try appendNonnegativeLong(result.batchTransferIndex)
+            if let index = result.batchTransferIndex { try appendNonnegativeLong(index) }
         }
     }
 
@@ -399,6 +401,11 @@ private struct CheckpointReader {
             return try .sendBtc(
                 operationID: OperationID(readString(maximumBytes: 128)),
                 txid: TransactionID(readString(maximumBytes: 64))
+            )
+        case 4:
+            return try .onchainSend(
+                operationID: OperationID(readString(maximumBytes: 128)),
+                result: .init(txid: TransactionID(readString(maximumBytes: 64)))
             )
         case 2:
             return try .createUtxos(

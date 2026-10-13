@@ -507,8 +507,8 @@ public struct OnchainSendRequest : Swift::Hashable, Swift::Sendable {
 }
 public struct OnchainSendResponse : Swift::Hashable, Swift::Sendable {
   public let txid: RGBSDK::TransactionID
-  public let batchTransferIndex: Swift::UInt64
-  public init(txid: RGBSDK::TransactionID, batchTransferIndex: Swift::UInt64)
+  public let batchTransferIndex: Swift::UInt64?
+  public init(txid: RGBSDK::TransactionID, batchTransferIndex: Swift::UInt64? = nil)
   public static func == (a: RGBSDK::OnchainSendResponse, b: RGBSDK::OnchainSendResponse) -> Swift::Bool
   public func hash(into hasher: inout Swift::Hasher)
   public var hashValue: Swift::Int {
@@ -753,8 +753,8 @@ public struct UTXO : Swift::Hashable, Swift::Sendable {
   public let outpoint: RGBSDK::Outpoint
   public let btcAmount: RGBSDK::Satoshis
   public let colorable: Swift::Bool
-  public let exists: Swift::Bool
-  public init(outpoint: RGBSDK::Outpoint, btcAmount: RGBSDK::Satoshis, colorable: Swift::Bool, exists: Swift::Bool)
+  public let exists: Swift::Bool?
+  public init(outpoint: RGBSDK::Outpoint, btcAmount: RGBSDK::Satoshis, colorable: Swift::Bool, exists: Swift::Bool? = nil)
   public static func == (a: RGBSDK::UTXO, b: RGBSDK::UTXO) -> Swift::Bool
   public func hash(into hasher: inout Swift::Hasher)
   public var hashValue: Swift::Int {
@@ -877,7 +877,8 @@ public struct TransferStatus : Swift::RawRepresentable, Swift::Hashable, Swift::
 }
 public struct Transfer : Swift::Hashable, Swift::Sendable {
   public let index: Swift::UInt64
-  public let batchTransferIndex: Swift::UInt64
+  public let batchTransferIndex: Swift::UInt64?
+  public let assetID: RGBSDK::AssetID?
   public let createdAt: RGBSDK::UnixSeconds
   public let updatedAt: RGBSDK::UnixSeconds
   public let status: RGBSDK::TransferStatus
@@ -889,9 +890,9 @@ public struct Transfer : Swift::Hashable, Swift::Sendable {
   public let receiveUTXO: RGBSDK::Outpoint?
   public let changeUTXO: RGBSDK::Outpoint?
   public let expiration: RGBSDK::UnixSeconds?
-  public let transportEndpoints: [RGBSDK::TransferTransportEndpoint]
+  public let transportEndpoints: [RGBSDK::TransferTransportEndpoint]?
   public let invoice: RGBSDK::RGBInvoice?
-  public init(index: Swift::UInt64, batchTransferIndex: Swift::UInt64, createdAt: RGBSDK::UnixSeconds, updatedAt: RGBSDK::UnixSeconds, status: RGBSDK::TransferStatus, requestedAssignment: RGBSDK::Assignment? = nil, assignments: [RGBSDK::Assignment], kind: RGBSDK::TransferKind, txid: RGBSDK::TransactionID? = nil, recipientID: Swift::String? = nil, receiveUTXO: RGBSDK::Outpoint? = nil, changeUTXO: RGBSDK::Outpoint? = nil, expiration: RGBSDK::UnixSeconds? = nil, transportEndpoints: [RGBSDK::TransferTransportEndpoint] = [], invoice: RGBSDK::RGBInvoice? = nil)
+  public init(index: Swift::UInt64, batchTransferIndex: Swift::UInt64?, createdAt: RGBSDK::UnixSeconds, updatedAt: RGBSDK::UnixSeconds, status: RGBSDK::TransferStatus, requestedAssignment: RGBSDK::Assignment? = nil, assignments: [RGBSDK::Assignment], kind: RGBSDK::TransferKind, txid: RGBSDK::TransactionID? = nil, recipientID: Swift::String? = nil, receiveUTXO: RGBSDK::Outpoint? = nil, changeUTXO: RGBSDK::Outpoint? = nil, expiration: RGBSDK::UnixSeconds? = nil, transportEndpoints: [RGBSDK::TransferTransportEndpoint]? = nil, invoice: RGBSDK::RGBInvoice? = nil, assetID: RGBSDK::AssetID? = nil)
   public static func == (a: RGBSDK::Transfer, b: RGBSDK::Transfer) -> Swift::Bool
   public func hash(into hasher: inout Swift::Hasher)
   public var hashValue: Swift::Int {
@@ -942,16 +943,16 @@ public struct AssetIFA : Swift::Hashable, Swift::Sendable {
   public let ticker: Swift::String
   public let name: Swift::String
   public let precision: Swift::UInt8
-  public let initialSupply: RGBSDK::AssetAmount
-  public let maximumSupply: RGBSDK::AssetAmount
-  public let knownCirculatingSupply: RGBSDK::AssetAmount
+  public let initialSupply: RGBSDK::AssetAmount?
+  public let maximumSupply: RGBSDK::AssetAmount?
+  public let knownCirculatingSupply: RGBSDK::AssetAmount?
   public let timestamp: RGBSDK::UnixSeconds
   public let addedAt: RGBSDK::UnixSeconds
   public let balance: RGBSDK::AssetBalance
   public let details: Swift::String?
   public let media: RGBSDK::Media?
   public let rejectListURL: Foundation::URL?
-  public init(assetID: RGBSDK::AssetID, ticker: Swift::String, name: Swift::String, precision: Swift::UInt8, initialSupply: RGBSDK::AssetAmount, maximumSupply: RGBSDK::AssetAmount, knownCirculatingSupply: RGBSDK::AssetAmount, timestamp: RGBSDK::UnixSeconds, addedAt: RGBSDK::UnixSeconds, balance: RGBSDK::AssetBalance, details: Swift::String? = nil, media: RGBSDK::Media? = nil, rejectListURL: Foundation::URL? = nil) throws
+  public init(assetID: RGBSDK::AssetID, ticker: Swift::String, name: Swift::String, precision: Swift::UInt8, initialSupply: RGBSDK::AssetAmount?, maximumSupply: RGBSDK::AssetAmount?, knownCirculatingSupply: RGBSDK::AssetAmount?, timestamp: RGBSDK::UnixSeconds, addedAt: RGBSDK::UnixSeconds, balance: RGBSDK::AssetBalance, details: Swift::String? = nil, media: RGBSDK::Media? = nil, rejectListURL: Foundation::URL? = nil) throws
   public static func == (a: RGBSDK::AssetIFA, b: RGBSDK::AssetIFA) -> Swift::Bool
   public func hash(into hasher: inout Swift::Hasher)
   public var hashValue: Swift::Int {
@@ -1064,12 +1065,27 @@ public actor KeychainAPIKeyStore : RGBSDK::WalletAPIKeyProvider {
     get
   }
 }
+public struct WalletChainContext : Swift::Hashable, Swift::Sendable {
+  public let network: RGBSDK::Network
+  public let tipHeight: Swift::UInt32
+  public let observedAt: RGBSDK::UnixSeconds
+  public init(network: RGBSDK::Network, tipHeight: Swift::UInt32, observedAt: RGBSDK::UnixSeconds) throws
+  public static func == (a: RGBSDK::WalletChainContext, b: RGBSDK::WalletChainContext) -> Swift::Bool
+  public func hash(into hasher: inout Swift::Hasher)
+  public var hashValue: Swift::Int {
+    get
+  }
+}
+public protocol WalletChainContextProvider : Swift::Sendable {
+  func loadChainContext(network: RGBSDK::Network) async throws -> RGBSDK::WalletChainContext
+}
 public struct WalletServiceConfiguration : Swift::Sendable, Swift::CustomStringConvertible, Swift::CustomReflectable {
   public let baseURL: Foundation::URL
   public let apiKeyProvider: any RGBSDK::WalletAPIKeyProvider
   public let allowInsecureLocalDevelopment: Swift::Bool
   public let requestTimeout: Foundation::TimeInterval
-  public init(baseURL: Foundation::URL, apiKeyProvider: any RGBSDK::WalletAPIKeyProvider, allowInsecureLocalDevelopment: Swift::Bool = false, requestTimeout: Foundation::TimeInterval = 30) throws
+  public let chainContextProvider: (any RGBSDK::WalletChainContextProvider)?
+  public init(baseURL: Foundation::URL, apiKeyProvider: any RGBSDK::WalletAPIKeyProvider, allowInsecureLocalDevelopment: Swift::Bool = false, requestTimeout: Foundation::TimeInterval = 30, chainContextProvider: (any RGBSDK::WalletChainContextProvider)? = nil) throws
   public var description: Swift::String {
     get
   }

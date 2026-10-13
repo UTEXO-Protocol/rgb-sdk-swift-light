@@ -46,7 +46,10 @@ public actor UTEXOWallet {
             baseURL: service.baseURL, apiKeyProvider: service.apiKeyProvider,
             network: configuration.network,
             allowInsecureLocalDevelopment: service.allowInsecureLocalDevelopment,
-            requestTimeout: service.requestTimeout
+            allowUnverifiedPsbtProfile: true,
+            requestTimeout: service.requestTimeout,
+            chainContextProvider: service.chainContextProvider,
+            requiresApplicationChainContext: true
         )
         let provider = try keyProvider ?? KeychainSeedStore(
             service: storage.keychainService, walletID: configuration.walletID,
@@ -81,7 +84,9 @@ public actor UTEXOWallet {
         self.backend = backend
         self.keyProvider = keyProvider
         self.durableJournal = durableJournal
-        signingEngineFactory = UniFFILocalSigningEngineFactory()
+        signingEngineFactory = UniFFILocalSigningEngineFactory(
+            gatewayProfile: backend is GatewayWalletBackend,
+            gatewaySigningAvailable: (backend as? GatewayWalletBackend)?.hasApplicationChainContextProvider ?? true)
         operationCoordinator = OperationCoordinator(
             configuration: configuration, backend: backend, journal: durableJournal,
             now: { try checkedUnixMilliseconds() / 1_000 }
@@ -190,10 +195,14 @@ public actor UTEXOWallet {
         }
     }
 
+    /// Allocates a fresh, locally ownership-verified address. The lightweight
+    /// gateway does not provide persistent address reuse/pinning.
     public func getAddress() async throws -> BitcoinAddress {
         try await reserveAddress(rotate: false)
     }
 
+    /// Allocates another fresh, locally verified address in gateway mode.
+    /// This does not enable or rotate a persistent reusable-address setting.
     public func rotateVanillaAddress() async throws -> BitcoinAddress {
         try await reserveAddress(rotate: true)
     }
@@ -223,7 +232,6 @@ public actor UTEXOWallet {
 
     public func sendBtc(_ request: SendBtcRequest) async throws -> TransactionID {
         try await withUnlocked { context, signer in
-            try requireLocalSigning(signer, operation: .sendBtc)
             return try await operationCoordinator.sendBtc(
                 backendContext: context,
                 signer: signer,
@@ -253,9 +261,8 @@ public actor UTEXOWallet {
         )
     }
 
-    /// The gateway must provide durable completion/recovery before its production
-    /// money-movement gate can be enabled. Output plans are derived from its PSBT
-    /// and independently validated against local keys before signing.
+    /// Output plans are derived from the prepared PSBT and independently
+    /// validated against local keys before signing.
     public func createUtxos() async throws -> CreateUtxosResult {
         try await createUtxos(CreateUtxosRequest())
     }
@@ -343,9 +350,8 @@ public actor UTEXOWallet {
         try await withUnlocked { context, signer in
             try requireLocalRGBInvoiceParsing(signer)
             let startedAt = try checkedUnixMilliseconds() / 1_000
-            // The current gateway SPI defaults reject these routes because its
-            // response lacks the required batch index. A backend implementing
-            // the complete contract must still pass the same local validation.
+            // Native batch identity and the independently decoded invoice must
+            // both satisfy this strict receive contract.
             let received = try await backendCall {
                 if witness { return try await backend.witnessReceive(context: context, request: request) }
                 return try await backend.blindReceive(context: context, request: request)
@@ -370,8 +376,8 @@ public actor UTEXOWallet {
         }
     }
 
-    /// Surface frozen now; disabled until backend evidence can be bound to the
-    /// caller's RGB intent and the server-trust boundary is explicitly versioned.
+    /// Locally authorizes the invoice's Bitcoin transaction; full RGB state
+    /// validation remains server-side. Missing native batch identity is nil.
     public func onchainSend(_ request: OnchainSendRequest) async throws -> OnchainSendResponse {
         try await withUnlocked { context, signer in
             return try await operationCoordinator.onchainSend(backendContext: context, signer: signer, request: request)
@@ -565,7 +571,8 @@ public actor UTEXOWallet {
         guard capabilities.derivationProfile == WalletCapabilities.derivationProfileV1 else {
             throw SDKError.backendProtocolMismatch("local derivation profile is incompatible")
         }
-        guard capabilities.signingProfile == WalletCapabilities.signingProfileV1 else {
+        guard capabilities.signingProfile == WalletCapabilities.signingProfileV1
+            || capabilities.signingProfile == GatewaySigningContext.profile else {
             throw SDKError.backendProtocolMismatch("local signing profile is incompatible")
         }
     }

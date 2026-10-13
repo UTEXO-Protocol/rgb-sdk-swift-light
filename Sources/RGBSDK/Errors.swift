@@ -231,6 +231,14 @@ extension SDKError {
 }
 
 @inline(__always)
+func requireBoundedDisplayText(_ value: String, field: String, maximumUTF8Bytes: Int) throws -> String {
+    guard !value.isEmpty, value.utf8.count <= maximumUTF8Bytes else {
+        throw SDKError.invalidArgument(field, "must be nonempty and at most \(maximumUTF8Bytes) UTF-8 bytes")
+    }
+    return value
+}
+
+@inline(__always)
 func requireBoundedText(_ value: String, field: String, maximumUTF8Bytes: Int) throws -> String {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !normalized.isEmpty else { throw SDKError.invalidArgument(field, "must not be empty") }
