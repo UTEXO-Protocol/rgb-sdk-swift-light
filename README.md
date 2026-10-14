@@ -320,8 +320,6 @@ The SDK encrypts a durable operation journal automatically. Your app must separa
 - Submitted operations recover through status reconciliation, preserving the original signed bytes. Definitive terminal results replay from the journal without a second payment.
 - `operation.ambiguous` means the outcome is unknown. Keep it pending and use bounded backoff or manual reconciliation; creating a new key or payment can double-pay.
 
-Backend broadcast/crash and expiry gaps can remain ambiguous indefinitely. The SDK has no public pending-operation enumeration or cross-device journal migration API. A seed backup alone does not recover app payment intents, the journal, or server-held RGB state. See [Durable consumer recovery](docs/DURABLE_CONSUMER_RECOVERY.md) for the exact BTC persistence contract and evidence.
-
 Keep wallet IDs, storage directories, Keychain services, gateway identity, and account identity stable. The journal is bound to them, encrypted with a device-bound key, and protected against tampering and rollback. It retains unresolved evidence and compact terminal receipts, with limits of 64 MiB and 100,000 logical operations per wallet. Do not delete/copy journal files or Keychain items to clear uncertainty or reclaim capacity; downgraded SDK versions cannot read upgraded snapshots.
 
 ## Lifecycle and errors
@@ -332,7 +330,7 @@ Call `destroy()` or its alias `dispose()` when permanently releasing an instance
 
 Catch `SDKError` and branch on `code`, not text. Its `retryable`, `operationID`, and `correlationID` fields support app decisions and support diagnostics. Retryable does not authorize a replacement payment. Treat `wallet.key_access_failed` as a key access/restore issue, `configuration.unsupported` as a capability/configuration issue, and `backend.protocol_mismatch` as an incompatible service response. Never log credentials, recovery material, invoices, or backend bodies.
 
-## Available surface and further reference
+## Available surface
 
 | Workflow | Current lightweight gateway behavior |
 | --- | --- |
@@ -344,7 +342,5 @@ Catch `SDKError` and branch on `code`, not text. Its `retryable`, `operationID`,
 | `listTransactions` / `listTransactionsByTxid` | Unsupported by this gateway; RGB transfer history is available |
 | Lightning, swaps, minting/redemption | No public APIs in this package |
 
-- [Privacy and metadata handling](PRIVACY.md)
-- [UTEXO documentation](https://docs.utexo.com/overview)
-- [Kotlin lightweight SDK](https://github.com/UTEXO-Protocol/rgb-sdk-kotlin-light)
-- [Contact UTEXO for an API key and integration setup](https://utexo.com/contact-sales)
+The [Kotlin lightweight SDK](https://github.com/UTEXO-Protocol/rgb-sdk-kotlin-light)
+is the companion integration for Android.
