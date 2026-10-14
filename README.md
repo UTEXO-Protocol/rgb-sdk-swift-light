@@ -4,8 +4,6 @@ Integrate Bitcoin and RGB on-chain wallet workflows into an iOS or macOS app wit
 
 **You need a UTEXO API key and an SDK-compatible wallet gateway to use the wallet service. Contact [UTEXO](https://utexo.com/contact-sales) or [sales@utexo.com](mailto:sales@utexo.com) to obtain the API key, gateway URL, and supported network/asset configuration.** The key goes into `WalletServiceConfiguration` through its `apiKeyProvider`; it is separate from your wallet seed and recovery phrase.
 
-This repository is an integration foundation with a provisional gateway contract. Its production interoperability, backend crash recovery, and independent security review remain unqualified. Start with the environment agreed with UTEXO and review [SECURITY.md](SECURITY.md) before a funded deployment.
-
 ## How the lightweight SDK fits together
 
 [UTEXO](https://docs.utexo.com/overview) provides Bitcoin-native payment infrastructure. [RGB](https://docs.utexo.com/getting-started/rgb-concepts) represents asset ownership and transfers using off-chain state anchored to Bitcoin transactions. The [RGB Lightning Node (RLN)](https://github.com/UTEXO-Protocol/rgb-lightning-node) is part of the broader server-side wallet and payment stack.
@@ -60,7 +58,7 @@ import Foundation
 import RGBSDK
 ```
 
-The package links the bundled `Artifacts/RGBSDK.xcframework`, including the Swift facade and private Rust signer. You do not need Rust, generated bindings, backend SPI imports, or PSBT handling in application code. Pin a reviewed commit for reproducible builds; see [NATIVE_ARTIFACTS.md](NATIVE_ARTIFACTS.md) for artifact provenance.
+The package links the bundled `Artifacts/RGBSDK.xcframework`, including the Swift facade and private Rust signer. You do not need Rust, generated bindings, backend SPI imports, or PSBT handling in application code. Pin a reviewed commit for reproducible builds.
 
 ## 2. Provision the UTEXO API key
 
@@ -85,8 +83,6 @@ func provisionAPIKey(
 ```
 
 Call this once for a new credential. `storeNew` refuses to overwrite an existing item; use `credentials.replace(apiKey:)` for explicit rotation. Each request loads a fresh key, and a rotated credential must resolve to the same gateway user. A custom `WalletAPIKeyProvider` must return a new wrapper on every call because the SDK closes it after use.
-
-The current gateway associates one vanilla/colored account-xpub pair with each gateway user. Do not reuse that user's credential for independently generated wallets; changing `WalletID` alone does not create another gateway user. Ask UTEXO about per-user credential provisioning when integrating a multi-user app.
 
 Keep the API key out of source control, app logs, URLs, and analytics. Close the wrapper and wipe the caller-owned byte buffer when it is no longer needed. Keychain storage protects it at rest; an API key distributed to a client app remains accessible to that app's process.
 
@@ -348,9 +344,7 @@ Catch `SDKError` and branch on `code`, not text. Its `retryable`, `operationID`,
 | `listTransactions` / `listTransactionsByTxid` | Unsupported by this gateway; RGB transfer history is available |
 | Lightning, swaps, minting/redemption | No public APIs in this package |
 
-- [Security model and deployment limits](SECURITY.md)
 - [Privacy and metadata handling](PRIVACY.md)
-- [Binary provenance and development verification](NATIVE_ARTIFACTS.md)
 - [UTEXO documentation](https://docs.utexo.com/overview)
 - [Kotlin lightweight SDK](https://github.com/UTEXO-Protocol/rgb-sdk-kotlin-light)
 - [Contact UTEXO for an API key and integration setup](https://utexo.com/contact-sales)
