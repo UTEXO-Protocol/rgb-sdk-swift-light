@@ -194,9 +194,13 @@ import Testing
     try tampered.write(to: fixture.snapshotURL())
     #expect(throws: SDKError.self) { try fixture.open() }
     try original.write(to: fixture.snapshotURL())
-    #expect(throws: SDKError.self) {
-        try fixture.open(serviceURL: URL(string: "https://another.example")!)
-    }
+    // The gateway URL is authenticated data, so another gateway cannot open
+    // the journal at all: unlike an account change, this stays a storage error.
+    do {
+        let other = try fixture.open(serviceURL: URL(string: "https://another.example")!)
+        await other.close()
+        Issue.record("journal opened for another gateway URL")
+    } catch let error as SDKError { #expect(error.code == .operationJournalUnavailable) }
 }
 
 @Test func encryptedJournalRejectsLossOfKeyOrFileWithoutGeneratingReplacement() async throws {
@@ -271,14 +275,33 @@ import Testing
     let fixture = try DurableJournalFixture()
     let journal = try fixture.open()
     try await fixture.bind(journal)
-    await #expect(throws: SDKError.self) { try await journal.bindSignerIdentity(fixture.identity(xpub: "different-wallet")) }
-    await #expect(throws: SDKError.self) { try await journal.bindGatewayUserID("different-user") }
+    // A binding mismatch is permanent, so it is a non-retryable invalid state
+    // (as in Kotlin), never a retryable storage failure.
+    do {
+        try await journal.bindSignerIdentity(fixture.identity(xpub: "different-wallet"))
+        Issue.record("journal accepted different wallet key material")
+    } catch let error as SDKError {
+        #expect(error.code == .invalidState && !error.retryable)
+        #expect(error.details == ["operation": "unlock", "state": "bound to different wallet key material"])
+    }
+    do {
+        try await journal.bindGatewayUserID("different-user")
+        Issue.record("journal accepted another gateway account")
+    } catch let error as SDKError {
+        #expect(error.code == .invalidState && !error.retryable)
+        #expect(error.details == ["operation": "initialize", "state": "bound to a different service or account"])
+    }
+    // A refused mismatch leaves the original bindings intact.
+    try await fixture.bind(journal)
     await #expect(throws: SDKError.self) {
         try await journal.load(walletID: WalletID("another-wallet"), idempotencyKey: IdempotencyKey("query"))
     }
     await journal.close()
     let restarted = try fixture.open()
-    await #expect(throws: SDKError.self) { try await restarted.bindGatewayUserID("different-user") }
+    do {
+        try await restarted.bindGatewayUserID("different-user")
+        Issue.record("restarted journal accepted another gateway account")
+    } catch let error as SDKError { #expect(error.code == .invalidState && !error.retryable) }
     await restarted.close()
 }
 

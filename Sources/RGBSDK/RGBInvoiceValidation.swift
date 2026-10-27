@@ -101,6 +101,12 @@ private func decodeNativeRGBInvoice(
     }
 }
 
+/// The gateway stamps a receive invoice's expiry from its own clock, so the
+/// expiry is checked against the requested duration with this much disagreement
+/// allowed between the device and gateway clocks. An invoice already expired by
+/// the device clock is still rejected.
+let maximumInvoiceClockSkewSeconds: UInt64 = 300
+
 /// Verify the untrusted invoice represents this exact receive request. The
 /// gateway remains trusted for the server-held blinded seal/watch-only receive
 /// state: this check does not prove key ownership or validate a consignment.
@@ -128,12 +134,15 @@ func validateReceivedRGBInvoice(
             stateMatches = decoded.encodedState.kind == .omitted
                 && decoded.encodedState.amount == nil
         }
-        let minimumExpiry = startedAt.addingReportingOverflow(duration)
-        let maximumExpiry = completedAt.addingReportingOverflow(duration)
+        let earliestExpiry = startedAt.addingReportingOverflow(duration)
+        let latestExpiry = completedAt.addingReportingOverflow(duration)
+        let minimumExpiry = earliestExpiry.partialValue.subtractingReportingOverflow(maximumInvoiceClockSkewSeconds)
+        let maximumExpiry = latestExpiry.partialValue.addingReportingOverflow(maximumInvoiceClockSkewSeconds)
         // UTEXO is a logical Signet configuration; invoices carry only the
         // underlying chain marker. Preserve decoded Signet in public data.
         let networkMatches = data.network == network || (network == .utexo && data.network == .signet)
         guard completedAt >= startedAt, duration > 0,
+              !earliestExpiry.overflow, !latestExpiry.overflow,
               !minimumExpiry.overflow, !maximumExpiry.overflow,
               networkMatches, decoded.witness == request.witness,
               data.assetID == request.assetID,

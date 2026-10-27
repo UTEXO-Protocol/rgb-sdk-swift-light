@@ -279,16 +279,95 @@ import Testing
 }
 
 @Test func gatewayPropagatesDurableIdentityBindingFailureBeforeOpeningSession() async throws {
-    let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"other-user","createdAt":1}"#)])
+    for failure in [
+        SDKError.operationJournalUnavailable,
+        SDKError.invalidState(operation: "initialize", state: "bound to a different service or account"),
+    ] {
+        let transport = GatewayStubTransport(responses: [gatewayResponse(#"{"userId":"other-user","createdAt":1}"#)])
+        let backend = GatewayWalletBackend(
+            configuration: try gatewayConfiguration(), transport: transport,
+            identityObserver: { _ in throw failure }
+        )
+        do {
+            _ = try await backend.initialize(.init(
+                walletID: WalletID("journal-bound-wallet"), network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+            ))
+            Issue.record("durable identity binding failure ignored")
+        } catch let error as SDKError {
+            #expect(error.code == failure.code && error.retryable == failure.retryable)
+        }
+    }
+}
+
+@Test func gatewayReportsInProcessUserChangeBeforeDurableIdentityBinding() async throws {
+    let observed = ObservedGatewayUsers()
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"first-user","createdAt":1}"#),
+        gatewayResponse(#"{"userId":"other-user","createdAt":1}"#),
+    ])
     let backend = GatewayWalletBackend(
         configuration: try gatewayConfiguration(), transport: transport,
-        identityObserver: { _ in throw SDKError.operationJournalUnavailable }
+        identityObserver: { await observed.append($0) }
     )
-    await #expect(throws: SDKError.self) {
-        try await backend.initialize(.init(
-            walletID: WalletID("journal-bound-wallet"), network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+    let walletID = try WalletID("user-change-wallet")
+    let session = try await backend.initialize(.init(
+        walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+    ))
+    try await backend.shutdown(session: session)
+    do {
+        _ = try await backend.initialize(.init(
+            walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
         ))
+        Issue.record("credential for another user accepted")
+    } catch let error as SDKError {
+        #expect(error.code == .backendProtocolMismatch && !error.retryable)
     }
+    // The durable binding never sees the other user, so it cannot turn this
+    // in-process change into a storage-bound account error.
+    #expect(await observed.users == ["first-user"])
+}
+
+@Test func gatewayRotatedCredentialCheckUsesOrdinaryFailureMapping() async throws {
+    let cases: [(GatewayHTTPResponse, SDKErrorCode, Bool, String?)] = [
+        (gatewayResponse(#"{"error":{"code":"UPSTREAM_UNAVAILABLE"}}"#, statusCode: 503), .backendUnavailable, true, nil),
+        (gatewayResponse(#"{"error":{"code":"RATE_LIMITED"}}"#, statusCode: 429), .backendUnavailable, true, nil),
+        (gatewayResponse(#"{"error":{"code":"UNAUTHORIZED"}}"#, statusCode: 401), .backendRejected, false, "UNAUTHORIZED"),
+        // Only a success that cannot bind the existing user is a mismatch.
+        (gatewayResponse(#"{"userId":"other-user","createdAt":1}"#), .backendProtocolMismatch, false, nil),
+        (gatewayResponse(#"{"userId":"first-user","createdAt":1}"#, mimeType: "text/plain"), .backendProtocolMismatch, false, nil),
+        (gatewayResponse("{malformed"), .backendProtocolMismatch, false, nil),
+        (gatewayResponse("{}", statusCode: 302), .backendProtocolMismatch, false, nil),
+    ]
+    for (response, code, retryable, backendCode) in cases {
+        let credentials = RotatingTestAPIKeyProvider("first-key")
+        let transport = GatewayStubTransport(responses: [
+            gatewayResponse(#"{"userId":"first-user","createdAt":1}"#), response,
+        ])
+        let backend = GatewayWalletBackend(
+            configuration: try GatewayBackendConfiguration(
+                baseURL: URL(string: "https://gateway.example")!, apiKeyProvider: credentials, network: .regtest
+            ), transport: transport
+        )
+        let walletID = try WalletID("rotation-wallet")
+        let session = try await backend.initialize(.init(
+            walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1
+        ))
+        await credentials.rotate("second-key")
+        do {
+            _ = try await backend.getBtcBalance(context: .init(session: session, walletID: walletID, network: .regtest))
+            Issue.record("unbound rotated credential accepted")
+        } catch let error as SDKError {
+            #expect(error.code == code)
+            #expect(error.retryable == retryable)
+            #expect(error.details["backendCode"] == backendCode)
+        }
+        #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/me"])
+    }
+}
+
+private actor ObservedGatewayUsers {
+    private(set) var users: [String] = []
+    func append(_ user: String) { users.append(user) }
 }
 
 private actor RotatingTestAPIKeyProvider: WalletAPIKeyProvider {
@@ -1648,6 +1727,55 @@ private actor RotatingTestAPIKeyProvider: WalletAPIKeyProvider {
     }
     #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/send-btc/prepare"])
     #expect(await journal.load(walletID: context.walletID, idempotencyKey: request.idempotencyKey)?.phase == .created)
+}
+
+@Test func prepareRejectsOversizedPsbtBeforeSigningOrJournaling() async throws {
+    // One Base64 block over the cap. Once signed it could not fit the 64 KiB
+    // complete body, so it must fail before PREPARED rather than at SUBMITTING.
+    let psbt = Data(repeating: 0x42, count: 36_867).base64EncodedString()
+    #expect(psbt.utf8.count == GatewayWalletBackend.maximumPreparedPsbtCharacters + 4)
+    let response = """
+    {"opId":"19191919-1919-4919-8919-191919191919","psbt":"\(psbt)","intent":{"kind":"send_btc","feeRateSatPerVb":2,"recipients":[{"address":"bcrt1precoveryaddress","scriptHex":"0014","amountSat":10000}],"asset":null,"utxos":null},"expiresAt":2000000}
+    """
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"prepare-oversized","createdAt":1}"#),
+        gatewayResponse(response, statusCode: 201),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let request = try gatewayRecoveryRequest(key: "prepare-oversized")
+    let journal = InMemoryOperationJournal()
+    let coordinator = OperationCoordinator(
+        configuration: try WalletConfiguration(walletID: context.walletID, network: .regtest),
+        backend: backend, journal: journal, now: { 1 }
+    )
+    do {
+        // GatewayNeverSigner traps on signing, so reaching it fails differently.
+        _ = try await coordinator.sendBtc(backendContext: context, signer: GatewayNeverSigner(), request: request)
+        Issue.record("expected oversized prepared PSBT rejection")
+    } catch let error as SDKError {
+        #expect(error.code == .backendProtocolMismatch && !error.retryable)
+        #expect(error.operationID == nil)
+    }
+    #expect(await transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/send-btc/prepare"])
+    #expect(await journal.load(walletID: context.walletID, idempotencyKey: request.idempotencyKey)?.phase == .created)
+}
+
+@Test func gatewayPrepareAcceptsPsbtExactlyAtTheSizeCap() async throws {
+    let psbt = Data(repeating: 0x42, count: 36_864).base64EncodedString()
+    #expect(psbt.utf8.count == GatewayWalletBackend.maximumPreparedPsbtCharacters)
+    let response = """
+    {"opId":"20202020-2020-4020-8020-202020202020","psbt":"\(psbt)","intent":{"kind":"send_btc","feeRateSatPerVb":2,"recipients":[{"address":"bcrt1precoveryaddress","scriptHex":"0014","amountSat":10000}],"asset":null,"utxos":null},"expiresAt":2000000}
+    """
+    let transport = GatewayStubTransport(responses: [
+        gatewayResponse(#"{"userId":"prepare-at-cap","createdAt":1}"#),
+        gatewayResponse(response, statusCode: 201),
+    ])
+    let (backend, context) = try await initializedGateway(transport: transport)
+    let operationContext = try gatewayOperationContext(backend: context, key: "prepare-at-cap")
+    let prepared = try await backend.prepareSendBtc(
+        .init(context: operationContext, request: gatewayRecoveryRequest(key: "prepare-at-cap"))
+    )
+    #expect(prepared.psbtBase64 == psbt)
 }
 
 @Test func completionConflictReconciliationCancellationPreservesEvidenceAndResumesReadOnly() async throws {

@@ -126,7 +126,7 @@ The built-in seed store is device-bound and does not synchronize to iCloud Keych
 
 Use a stable wallet ID, Keychain service, and dedicated storage directory. The example uses `.signet`; choose the network UTEXO provisioned for your gateway. Gateway configuration accepts `.mainnet`, `.testnet`, `.signet`, and `.regtest`, subject to the service's deployment. `.testnet4` and logical `.utexo` are rejected by the current gateway adapter even though they exist in the public `Network` enum.
 
-**Fresh spending also requires an app-owned `WalletChainContextProvider`.** Implement `loadChainContext(network:)` using an independently trusted source for that Bitcoin network, returning `WalletChainContext(network:tipHeight:observedAt:)`. Use the time the source observed its tip, not the block timestamp. The SDK requires a height below 500,000,000, an observation at most 300 seconds old, and future clock skew at most 30 seconds. Do not copy the height from the prepared transaction; this gateway has no chain-tip route.
+**Fresh spending also requires an app-owned `WalletChainContextProvider`.** Implement `loadChainContext(network:)` using an independently trusted source for that Bitcoin network, returning `WalletChainContext(network:tipHeight:observedAt:)`. Use the time the source observed its tip, not the block timestamp. The SDK requires a height below 500,000,000, an observation at most 300 seconds old, and future clock skew at most 30 seconds. Do not copy the height from the prepared transaction; this gateway has no chain-tip route. The tip must come from the chain your gateway actually runs on. UTEXO's signet environment is UTEXO's own signet, not Bitcoin's public signet, even though its invoices use the `sb` signet tag; read its tip from that environment's indexer (`https://esplora-api.utexo.com/blocks/tip/height`). A public-signet tip is far behind that chain, and the signer then rejects every new spend.
 
 ```swift
 func openWallet(
@@ -260,7 +260,7 @@ func receiveAsset(wallet: UTEXOWallet, assetID: AssetID) async throws -> String 
 }
 ```
 
-Use `witness: false` for a blinded recipient backed by an existing suitable allocation UTXO. Receive duration defaults to 86,400 seconds; the gateway accepts 60–2,592,000 seconds and 0–100 minimum confirmations. `onchainReceive` tolerates unavailable batch metadata. The compatibility methods `blindReceive` and `witnessReceive` require a native batch ID and fail if it is missing; do not automatically repeat invoice creation after an uncertain response.
+Use `witness: false` for a blinded recipient backed by an existing suitable allocation UTXO. Receive duration defaults to 86,400 seconds; the gateway accepts 60–2,592,000 seconds and 0–100 minimum confirmations. `onchainReceive` tolerates unavailable batch metadata. The compatibility methods `blindReceive` and `witnessReceive` require a native batch ID and fail if it is missing; do not automatically repeat invoice creation after an uncertain response. The gateway sets the invoice expiry from its own clock, so it must match the requested duration within 300 seconds of device/gateway clock difference; an invoice already expired by the device clock is still rejected.
 
 For a first receipt of an asset not yet known to the wallet, omit both `assetID` and `amount` to create an asset-agnostic invoice. After creating suitable allocation UTXOs, a blinded receive can use:
 
@@ -309,7 +309,7 @@ For a blinded invoice, omit `witnessData`. For a witness invoice, its satoshi am
 
 Keep invoice transport endpoints intact. The send route requires 1–4 unique endpoints accepted by the gateway; invoices using out-of-band consignment exchange without endpoints are unsupported.
 
-Refresh and inspect the resulting state with `refreshWallet()`, `listAssets()`, `getAssetBalance(assetID:)`, `listUnspents()`, `listTransfers(assetID:)`, `listTransfersByTxid(_:)`, or `listOnchainTransfers(assetID:)`. A transaction ID is not a settled RGB transfer; track statuses such as `.waitingCounterparty`, `.waitingConfirmations`, `.settled`, and `.failed`. Optional fields mean unknown, not zero. Both sync and refresh await the gateway's combined Bitcoin sync/RGB refresh; `completedAt` is a client-observed completion time and `tipHeight` is `nil`.
+Refresh and inspect the resulting state with `refreshWallet()`, `listAssets()`, `getAssetBalance(assetID:)`, `listUnspents()`, `listTransfers(assetID:)`, `listTransfersByTxid(_:)`, or `listOnchainTransfers(assetID:)`. `listTransfersByTxid(_:)` and `listTransfers()` without an asset ID search every asset, which costs one gateway request per asset. A transaction ID is not a settled RGB transfer; track statuses such as `.waitingCounterparty`, `.waitingConfirmations`, `.settled`, and `.failed`. Optional fields mean unknown, not zero. Both sync and refresh await the gateway's combined Bitcoin sync/RGB refresh; `completedAt` is a client-observed completion time and `tipHeight` is `nil`.
 
 ## 8. Persist payment intents and recover safely
 

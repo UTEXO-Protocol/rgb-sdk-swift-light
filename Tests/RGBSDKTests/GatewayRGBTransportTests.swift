@@ -53,6 +53,17 @@ private let rgbTxid = "e41e4ebdc769b0575126a5d728394d4c01206110e7eaebf6446029d5a
     }
 }
 
+@Test func gatewayRGBOversizedPreparedPsbtFailsBeforeSigningOrJournaling() async throws {
+    // Signing this would fail differently; the cap must reject it at prepare.
+    let psbt = Data(repeating: 0x42, count: 36_867).base64EncodedString()
+    #expect(psbt.utf8.count > GatewayWalletBackend.maximumPreparedPsbtCharacters)
+    let fixture = try await rgbFixture(responses: [try rgbPrepare(psbt: psbt)])
+    do { _ = try await fixture.perform(); Issue.record("oversized RGB preparation accepted") }
+    catch let error as SDKError { #expect(error.code == .backendProtocolMismatch && !error.retryable) }
+    #expect(try await fixture.checkpoint()?.phase == .created)
+    #expect(await fixture.transport.snapshot().count == 2)
+}
+
 @Test func gatewayRGBUncertainCompletionRemainsStatusOnlyAfterExpiryWithoutChainProvider() async throws {
     let fixture = try await rgbFixture(responses: [try rgbPrepare(),
         try rgbWire(["txid": String(repeating: "a", count: 64)]), try rgbStatus(state: "pending")])
@@ -201,8 +212,8 @@ private func rgbIntent() throws -> [String: Any] {
             "witnessAmountSat": NSNull(), "transportEndpoints": invoice.transportEndpoints]]
 }
 
-private func rgbPrepare(intent: [String: Any]? = nil) throws -> GatewayHTTPResponse {
-    try rgbWire(["opId": rgbOperationID, "psbt": GatewayNativeFixtures.rgb,
+private func rgbPrepare(intent: [String: Any]? = nil, psbt: String = GatewayNativeFixtures.rgb) throws -> GatewayHTTPResponse {
+    try rgbWire(["opId": rgbOperationID, "psbt": psbt,
         "intent": intent ?? rgbIntent(), "expiresAt": 2_000_000], status: 201)
 }
 

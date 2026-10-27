@@ -97,7 +97,10 @@ actor EncryptedOperationJournal: OperationJournal {
         ]))
         var (snapshot, key) = try read()
         if let existing = snapshot.signerIdentity {
-            guard existing == digest else { throw SDKError.operationJournalUnavailable }
+            // A different seed is permanent, not a retryable storage failure.
+            guard existing == digest else {
+                throw SDKError.invalidState(operation: "unlock", state: "bound to different wallet key material")
+            }
             return
         }
         guard snapshot.checkpoints.isEmpty else { throw SDKError.operationJournalUnavailable }
@@ -112,7 +115,10 @@ actor EncryptedOperationJournal: OperationJournal {
         }
         var (snapshot, key) = try read()
         if let existing = snapshot.gatewayUserID {
-            guard existing == userID else { throw SDKError.operationJournalUnavailable }
+            // Another gateway account is permanent, not a retryable storage failure.
+            guard existing == userID else {
+                throw SDKError.invalidState(operation: "initialize", state: "bound to a different service or account")
+            }
             return
         }
         guard snapshot.checkpoints.isEmpty else { throw SDKError.operationJournalUnavailable }

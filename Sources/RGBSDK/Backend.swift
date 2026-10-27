@@ -41,8 +41,13 @@ public protocol WalletBackend: Sendable {
         txid: TransactionID,
         skipSync: Bool
     ) async throws -> [Transaction]
-    /// Complete transfer snapshot, across all assets when assetID is nil.
+    /// Complete transfer list for `assetID`, or for the whole wallet when it is
+    /// nil: every asset's transfers plus asset-less receives. A backend whose
+    /// native nil filter means "asset-less only" (as the gateway's does) must
+    /// merge per-asset results; see `GatewayWalletBackend`.
     func listTransfers(context: BackendContext, assetID: AssetID?) async throws -> [Transfer]
+    /// By default filters the whole-wallet list from `listTransfers(context:assetID:)`
+    /// with a nil asset, so it costs as much as that call.
     func listTransfers(context: BackendContext, txid: TransactionID) async throws -> [Transfer]
     func failTransfers(context: BackendContext, request: FailTransfersRequest) async throws -> FailTransfersResult
     func refreshWallet(context: BackendContext) async throws -> SyncResult
@@ -101,6 +106,7 @@ public extension WalletBackend {
         throw unsupported(#function)
     }
     func listTransfers(context: BackendContext, txid: TransactionID) async throws -> [Transfer] {
+        // nil means the whole wallet (all assets plus asset-less), per the protocol contract.
         let transfers = try await listTransfers(context: context, assetID: nil)
         try Task.checkCancellation()
         return transfers.filter { $0.txid == txid }

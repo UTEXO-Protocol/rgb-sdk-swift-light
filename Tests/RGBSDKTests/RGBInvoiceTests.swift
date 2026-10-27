@@ -111,7 +111,8 @@ func invoiceTestString(
     let changedInvoices = [
         invoiceTestString(network: "bc"), invoiceTestString(witness: true),
         invoiceTestString(asset: invoiceTestAsset), invoiceTestString(assignment: "BF"),
-        invoiceTestString(expiry: 87_399), invoiceTestString(expiry: 87_402),
+        // Outside the 300-second clock-skew allowance around 87_400...87_401.
+        invoiceTestString(expiry: 87_099), invoiceTestString(expiry: 87_702),
         invoiceTestString(expiry: nil), invoiceTestString(endpoints: nil),
     ]
     for value in changedInvoices {
@@ -128,6 +129,19 @@ func invoiceTestString(
         #expect(throws: SDKError.self) {
             try validateReceivedRGBInvoice(bad, request: request, network: .regtest, startedAt: 1_000, completedAt: 1_001, duration: 86_400)
         }
+    }
+}
+
+@Test func receiveValidationToleratesBoundedDeviceAndGatewayClockSkew() throws {
+    // A gateway clock 2s ahead (as observed against an emulator) and both edges
+    // of the allowance around the expected 87_400...87_401 expiry.
+    let request = try OnchainReceiveRequest(witness: false)
+    for expiry: UInt64 in [87_402, 87_398, 87_100, 87_701] {
+        let data = try decodeRGBInvoiceLocally(RGBInvoice(invoiceTestString(expiry: expiry)))
+        let response = try OnchainReceiveResponse(
+            invoice: data.invoice, recipientID: data.recipientID, expirationTimestamp: data.expirationTimestamp
+        )
+        try validateReceivedRGBInvoice(response, request: request, network: .regtest, startedAt: 1_000, completedAt: 1_001, duration: 86_400)
     }
 }
 
@@ -233,6 +247,39 @@ func invoiceTestString(
     #expect(await backend.calls == 2) // initialize and watch-only registration only
     try await wallet.destroy()
     await #expect(throws: SDKError.self) { _ = try await wallet.decodeRGBInvoice(invoice) }
+}
+
+@Test func publicInvoiceDecodeRejectsAnotherNetworkAndAcceptsOnlyTheUtexoSignetAlias() async throws {
+    let cases: [(Network, String, Network?)] = [
+        (.regtest, "bcrt", .regtest), (.regtest, "bc", nil), (.regtest, "sb", nil),
+        (.utexo, "sb", .signet), (.utexo, "bcrt", nil), (.utexo, "bc", nil),
+    ]
+    for (network, chain, decodedNetwork) in cases {
+        let wallet = UTEXOWallet(
+            configuration: try WalletConfiguration(walletID: WalletID("invoice-network-\(network.rawValue)-\(chain)"), network: network),
+            backend: InvoiceTestBackend(), keyProvider: InvoiceTestKeys(), operationJournal: InMemoryOperationJournal()
+        )
+        try await wallet.initialize()
+        try await wallet.unlock()
+        let invoice = try RGBInvoice(invoiceTestString(network: chain))
+        if let decodedNetwork {
+            // UTEXO invoices carry the Signet chain marker; keep it in public data.
+            #expect(try await wallet.decodeRGBInvoice(invoice).network == decodedNetwork)
+            #expect(try await wallet.decodeRgbInvoice(invoice).network == decodedNetwork)
+        } else {
+            for alias in [false, true] {
+                do {
+                    if alias { _ = try await wallet.decodeRgbInvoice(invoice) }
+                    else { _ = try await wallet.decodeRGBInvoice(invoice) }
+                    Issue.record("invoice from another network decoded")
+                } catch let error as SDKError {
+                    #expect(error.code == .wrongNetwork && !error.retryable)
+                    #expect(error.details["expected"] == network.rawValue)
+                }
+            }
+        }
+        try await wallet.destroy()
+    }
 }
 
 @Test func publicReceiveHonorsCancellationEvenWhenAnInjectedBackendReturns() async throws {

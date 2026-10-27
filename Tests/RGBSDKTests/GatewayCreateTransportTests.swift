@@ -116,6 +116,23 @@ private let createTxid = "9f4b8d594d577e5b73cd941db229870965f099bf0092df8cf9444c
     }
 }
 
+@Test func gatewayCreateRejectsOversizedPsbtBeforePlanExtractionOrJournaling() async throws {
+    let psbt = Data(repeating: 0x42, count: 36_867).base64EncodedString()
+    #expect(psbt.utf8.count > GatewayWalletBackend.maximumPreparedPsbtCharacters)
+    let fixture = try await createTransportFixture(responses: [try createPrepareResponse(psbt: psbt)])
+    do {
+        _ = try await fixture.coordinator.createUtxos(
+            backendContext: fixture.context, signer: GatewayNativeFixtures.signer(), request: fixture.request)
+        Issue.record("oversized create PSBT accepted")
+    } catch let error as SDKError {
+        #expect(error.code == .backendProtocolMismatch && !error.retryable)
+        // The size cap, not native plan extraction, must reject it.
+        #expect(error.message.hasSuffix("prepared PSBT exceeds the gateway completion size limit"))
+    }
+    #expect(await fixture.transport.snapshot().count == 2)
+    #expect(await fixture.journal.load(walletID: fixture.context.walletID, idempotencyKey: fixture.request.idempotencyKey)?.phase == .created)
+}
+
 @Test func gatewayCreateUnsupportedArgumentsFailBeforeNewCheckpointAndHTTP() async throws {
     for request in try [
         CreateUtxosRequest(num: 51), CreateUtxosRequest(size: Satoshis(329)),
