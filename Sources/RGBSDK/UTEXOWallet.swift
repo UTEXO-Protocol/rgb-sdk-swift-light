@@ -318,7 +318,14 @@ public actor UTEXOWallet {
     public func decodeRGBInvoice(_ invoice: RGBInvoice) async throws -> InvoiceData {
         try await withUnlocked { _, signer in
             try requireLocalRGBInvoiceParsing(signer)
-            return try decodeRGBInvoiceLocally(invoice)
+            let decoded = try decodeRGBInvoiceLocally(invoice)
+            // An invoice names the chain, not the logical UTEXO network: a
+            // UTEXO wallet accepts only the Signet marker besides its own.
+            let network = configuration.network
+            guard decoded.network == network || (network == .utexo && decoded.network == .signet) else {
+                throw SDKError.wrongNetwork(expected: network, actual: decoded.network)
+            }
+            return decoded
         }
     }
 

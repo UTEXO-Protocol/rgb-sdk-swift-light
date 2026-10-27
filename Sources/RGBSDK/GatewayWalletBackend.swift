@@ -162,6 +162,9 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
 public actor GatewayWalletBackend: WalletBackend {
     private static let apiVersion: UInt32 = 1
     private static let maximumRequestBytes = 64 * 1_024
+    /// Leaves room for signatures under the gateway's 64 KiB complete-body
+    /// limit, so an oversized preparation fails before signing or journaling.
+    static let maximumPreparedPsbtCharacters = 48 * 1_024
     static let javascriptMaximumSafeInteger: UInt64 = 9_007_199_254_740_991
 
     private let configuration: GatewayBackendConfiguration
@@ -266,6 +269,14 @@ public actor GatewayWalletBackend: WalletBackend {
             guard gatewayUserID == response.userId else { throw SDKError.operationJournalUnavailable }
         } catch {
             throw SDKError.backendProtocolMismatch("gateway returned a malformed user identity")
+        }
+        // A user change within this backend's lifetime is a protocol mismatch
+        // (as in Kotlin). Check it before the durable observer, which reports
+        // storage bound to another account as `invalidState`.
+        if let boundGatewayUserID, boundGatewayUserID != gatewayUserID {
+            throw SDKError.backendProtocolMismatch(
+                "gateway credential resolved to a different user identity"
+            )
         }
         try await identityObserver?(gatewayUserID)
 
@@ -474,7 +485,45 @@ public actor GatewayWalletBackend: WalletBackend {
         return try gatewayMapped { try wire.model() }
     }
 
+    /// A nil `assetID` returns every wallet transfer, ordered by `index`. The gateway
+    /// (rgb-lib) treats a nil asset as "asset-less transfers only", so the full list
+    /// is rebuilt here: the asset-less transfers, then the asset list, then one
+    /// transfers request per asset. That costs N + 2 requests for N assets. Reading
+    /// the asset-less page before the asset list means a transfer that gains its
+    /// asset meanwhile is still seen. A non-nil `assetID` is a single request.
     public func listTransfers(context: BackendContext, assetID: AssetID?) async throws -> [Transfer] {
+        if let assetID { return try await listTransferPage(context: context, assetID: assetID) }
+        let assetLess = try await listTransferPage(context: context, assetID: nil)
+        let assets = try await listAssets(context: context)
+        var pages = [assetLess]
+        let assetIDs: [AssetID] = assets.nia.map(\.assetID) + assets.cfa.map(\.assetID)
+            + assets.ifa.map(\.assetID) + assets.uda.map(\.assetID)
+        for id in assetIDs {
+            pages.append(try await listTransferPage(context: context, assetID: id))
+        }
+        return try Self.mergeTransferPages(pages)
+    }
+
+    /// Merges pages by `index`, which rgb-lib keeps unique per wallet, in fetch order.
+    /// A later row that carries an asset replaces an earlier row with the same index
+    /// (the transfer gained its asset between requests); a later asset-less row never
+    /// replaces one. The same index under two different assets is contradictory: no
+    /// row can be trusted, so it is a protocol mismatch rather than a silent pick.
+    private static func mergeTransferPages(_ pages: [[Transfer]]) throws -> [Transfer] {
+        var merged: [UInt64: Transfer] = [:]
+        for transfer in pages.joined() {
+            if let existing = merged[transfer.index] {
+                if let kept = existing.assetID, let next = transfer.assetID, kept != next {
+                    throw SDKError.backendProtocolMismatch("gateway returned one transfer index for two assets")
+                }
+                if transfer.assetID == nil { continue }
+            }
+            merged[transfer.index] = transfer
+        }
+        return merged.values.sorted { $0.index < $1.index }
+    }
+
+    private func listTransferPage(context: BackendContext, assetID: AssetID?) async throws -> [Transfer] {
         try requireContext(context)
         var route = URLComponents()
         route.path = "/v1/wallet/transfers"
@@ -691,10 +740,19 @@ public actor GatewayWalletBackend: WalletBackend {
         return wholeSatsPerVByte
     }
 
+    /// A signed PSBT that cannot fit the complete body would never be sent, and
+    /// every retry would then reconcile a payment that was never broadcast.
+    private func requireSubmittablePreparedPsbtSize(_ psbt: String) throws {
+        guard psbt.utf8.count <= Self.maximumPreparedPsbtCharacters else {
+            throw SDKError.backendProtocolMismatch("prepared PSBT exceeds the gateway completion size limit")
+        }
+    }
+
     private func makePrepared(
         _ response: PreparedResponse, context: OperationRequestContext,
         operation: OperationKind, outputPlan: CreateUtxosOutputPlan? = nil
     ) throws -> PreparedTransaction {
+        try requireSubmittablePreparedPsbtSize(response.psbt)
         try validateCanonicalBase64(response.psbt, field: "prepared PSBT")
         let currentTime = try nowMilliseconds()
         let maximumTTLMilliseconds = UInt64(configuration.maximumPreparationTTL * 1_000)
@@ -734,6 +792,7 @@ public actor GatewayWalletBackend: WalletBackend {
         try Task.checkCancellation()
         try requireContext(request.context.backend)
         try validateCreateIntent(response.intent, request: body)
+        try requireSubmittablePreparedPsbtSize(response.psbt)
         let plan = try extractCreateOutputPlan(response.psbt)
         // This is only a bounded, untrusted origin projection. Before signing,
         // the native signer independently derives every script from local keys
@@ -1298,10 +1357,25 @@ public actor GatewayWalletBackend: WalletBackend {
         } catch {
             throw SDKError.backendUnavailable()
         }
+        let correlationID = validatedCorrelationID(response.correlationID)
+        // Classify a failed check like any other gateway call: a revoked key
+        // is a rejection, and an outage or rate limit stays retryable. Only a
+        // redirect or a success that cannot bind the existing user is a mismatch.
+        if !(200..<400).contains(response.statusCode) {
+            throw mapGatewayFailure(
+                statusCode: response.statusCode,
+                body: response.body,
+                context: .init(),
+                correlationID: correlationID
+            )
+        }
         guard response.statusCode == 200, response.mimeType?.lowercased() == "application/json",
               let identity = try? JSONDecoder().decode(MeResponse.self, from: response.body),
               identity.userId == expectedUserID else {
-            throw SDKError.backendProtocolMismatch("rotated credential could not be bound to the existing wallet user")
+            throw SDKError.backendProtocolMismatch(
+                "rotated credential could not be bound to the existing wallet user",
+                correlationID: correlationID
+            )
         }
     }
 
