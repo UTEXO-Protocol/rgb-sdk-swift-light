@@ -39,8 +39,10 @@ curl -X POST https://your-gateway.example/v1/users \
 ```
 
 The simulator shares the Mac's network, so a gateway on your own machine is
-`http://127.0.0.1:<port>`. Against `rgb-lightning-node`'s regtest stack, also
-select `regtest` and use `http://127.0.0.1:3002/blocks/tip/height` as the tip URL.
+`http://127.0.0.1:<port>`. Against the lightsdk-gateway regtest stack (`regtest/`
+in the gateway repository), also select `regtest` and use
+`http://127.0.0.1:3002/blocks/tip/height` as the tip URL.
+[PAYMENT_TESTING.md](PAYMENT_TESTING.md) walks through a full local run.
 
 For scripted runs, every field can be set at launch, and `run` connects and
 then runs the named actions in order. `simctl` passes `SIMCTL_CHILD_<name>`

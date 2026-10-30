@@ -6,7 +6,7 @@ Integrate Bitcoin and RGB on-chain wallet workflows into an iOS or macOS app wit
 
 ## How the lightweight SDK fits together
 
-[UTEXO](https://docs.utexo.com/overview) provides Bitcoin-native payment infrastructure. [RGB](https://docs.utexo.com/getting-started/rgb-concepts) represents asset ownership and transfers using off-chain state anchored to Bitcoin transactions. The [RGB Lightning Node (RLN)](https://github.com/UTEXO-Protocol/rgb-lightning-node) is part of the broader server-side wallet and payment stack.
+[UTEXO](https://docs.utexo.com/overview) provides Bitcoin-native payment infrastructure. [RGB](https://docs.utexo.com/getting-started/rgb-concepts) represents asset ownership and transfers using off-chain state anchored to Bitcoin transactions. On the server side, [rgb-node-api](https://github.com/UTEXO-Protocol/rgb-node-api) keeps one watch-only wallet per user behind the wallet gateway.
 
 This package connects your app to the compatible wallet gateway in that stack:
 
@@ -14,14 +14,14 @@ This package connects your app to the compatible wallet gateway in that stack:
 Your iOS/macOS app
   └─ RGBSDK / UTEXOWallet
        ├─ Local: seed storage, key derivation, invoice parsing, Bitcoin checks/signing
-       └─ HTTPS + UTEXO API key → compatible wallet gateway → RGB/Bitcoin services
+       └─ HTTPS + UTEXO API key → compatible wallet gateway → rgb-node-api → Bitcoin indexer, RGB proxy
 ```
 
 The gateway prepares transactions and manages state, synchronization, and submission. The SDK validates the authorized Bitcoin transaction and signs on the device. Registration sends the two account xpubs and master fingerprint; the seed, mnemonic, and private keys remain local. Xpubs still reveal wallet information and should be treated as private metadata.
 
 **Lightweight means server-assisted RGB state.** The SDK's local invoice checks and Bitcoin signing do not validate a full RGB transition or prove asset allocations. Balances and RGB state are gateway assertions; `localRGBValidation` is `false`.
 
-The broader RLN supports additional features, but this Swift facade has **no Lightning channel, Lightning invoice, or Lightning payment API**. Its asset listing recognizes NIA, CFA, UDA, and IFA; BFA assets used by [current Mint-issued USDT](https://docs.utexo.com/getting-started/rgb-concepts) are outside this profile. Obtain a compatible asset ID and schema from UTEXO before integrating a particular token.
+The gateway handles on-chain Bitcoin and RGB only, so this Swift facade has **no Lightning channel, Lightning invoice, or Lightning payment API**. Its asset listing recognizes NIA, CFA, UDA, and IFA; BFA assets used by [current Mint-issued USDT](https://docs.utexo.com/getting-started/rgb-concepts) are outside this profile. Obtain a compatible asset ID and schema from UTEXO before integrating a particular token.
 
 ## 1. Install the package
 
@@ -64,7 +64,7 @@ The package links the bundled `Artifacts/RGBSDK.xcframework`, including the Swif
 
 Receive the real API key through your app's trusted provisioning flow. Supply its UTF-8 bytes to `WalletAPIKey`, store it with `KeychainAPIKeyStore`, and pass that store to the service configuration. Supply the **key itself**, without the `Bearer ` prefix; the transport adds the authorization header.
 
-This credential authenticates a wallet gateway user. Cloud management tokens, RLN Biscuit credentials, and Swap affiliate keys belong to different APIs and cannot be substituted here.
+This credential authenticates a wallet gateway user. Cloud management tokens and Swap affiliate keys belong to different APIs and cannot be substituted here; rgb-node-api has no credentials of its own and is never called by the app.
 
 ```swift
 func provisionAPIKey(
@@ -173,7 +173,7 @@ func openWallet(
 
 Run the provisioning functions once using these same wallet/service values. On later launches, load the existing stores and call `openWallet`; do not provision again. Passing `nil` for the chain provider permits reads, receiving, and submitted-operation recovery, but new local signing is unavailable. Inspect `await wallet.capabilities` after unlocking; `localSigningOperations` identifies locally enabled operations and does not certify backend readiness.
 
-`baseURL` is an HTTPS **origin**, such as the host UTEXO supplies, with no path, query, fragment, or embedded credentials. It must serve this SDK's wallet gateway contract; a plain RLN endpoint, Cloud API URL, or Swap API URL is not interchangeable. Local HTTP is allowed only for an exact loopback host with `allowInsecureLocalDevelopment: true`.
+`baseURL` is an HTTPS **origin**, such as the host UTEXO supplies, with no path, query, fragment, or embedded credentials. It must serve this SDK's wallet gateway contract; an rgb-node-api endpoint, Cloud API URL, or Swap API URL is not interchangeable. Local HTTP is allowed only for an exact loopback host with `allowInsecureLocalDevelopment: true`.
 
 ## 5. Receive Bitcoin and fund RGB operations
 

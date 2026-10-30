@@ -153,7 +153,7 @@ public struct GatewayBackendConfiguration: Sendable, CustomStringConvertible, Cu
     }
 }
 
-/// HTTP adapter for the minimal gateway added by rgb-lightning-node PR #174.
+/// HTTP adapter for lightsdk-gateway, the watch-only wallet gateway in front of rgb-node-api.
 ///
 /// It intentionally implements only wire mappings with exact semantics. In
 /// particular, raw PSBTs remain behind `WalletBackend`; `UTEXOWallet.sendBtc`
