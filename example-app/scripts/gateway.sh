@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Start a local lightsdk-gateway against its regtest stack (regtest/ in the
-# gateway repository: bitcoind, electrs, esplora, the RGB proxy and rgb-node-api).
+# gateway repository: bitcoind, electrs, the RGB proxy and rgb-node-api).
 #
 #   gateway.sh            run the gateway as built (dist/main.js)
 #
@@ -38,10 +38,11 @@ echo "data dir:       $data_dir" >&2
 cd "$gateway_dir"
 # RGB_PROXY_URL must be the proxy exactly as rgb-node-api names it in invoices:
 # on the regtest stack rgb-node-api reaches it as `proxy` on the compose network.
+# ELECTRUM_URL serves only fee estimates; set it empty to run without them.
 exec env \
     GATEWAY_PORT="${GATEWAY_PORT:-8490}" \
     RGB_NODE_API_URL="${RGB_NODE_API_URL:-http://127.0.0.1:34000}" \
-    ESPLORA_URL="${ESPLORA_URL:-http://127.0.0.1:3002}" \
+    ELECTRUM_URL="${ELECTRUM_URL-tcp://127.0.0.1:50001}" \
     RGB_PROXY_URL="${RGB_PROXY_URL:-rpc://proxy:3000/json-rpc}" \
     GATEWAY_BITCOIN_NETWORK="${GATEWAY_BITCOIN_NETWORK:-Regtest}" \
     GATEWAY_SQLITE_PATH="$data_dir/gateway.sqlite" \

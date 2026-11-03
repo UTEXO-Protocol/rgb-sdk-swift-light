@@ -1,7 +1,7 @@
 # `example-app`: a reference integration
 
-A single-screen iOS app that exercises the UTEXO Swift SDK against a
-`minimal-gateway` deployment. It exists to be read: every SDK call lives in one
+A single-screen iOS app that exercises the UTEXO Swift SDK against a lightsdk
+gateway (`rln-gateway`) deployment. It exists to be read: every SDK call lives in one
 file, [`ExampleWallet.swift`](UTEXOExample/ExampleWallet.swift), with no
 architecture in the way. [`UTEXOExampleApp.swift`](UTEXOExample/UTEXOExampleApp.swift)
 only lays out the screen.
@@ -27,8 +27,10 @@ it builds against the committed binary facade. For a physical device, set your
 development team on the target first.
 
 Launch the app, paste a gateway URL and a bearer token, and press **Connect**.
-The defaults target UTEXO's signet environment: `Network.signet`, with the
-trusted chain tip read from `https://esplora-api.utexo.com/blocks/tip/height`.
+The defaults target UTEXO's stage gateway,
+`https://stage.gateway.lightsdk.utexo.com`, on Bitcoin's public signet:
+`Network.signet`, with the trusted chain tip read from
+`https://mempool.space/signet/api/blocks/tip/height`.
 
 A token is minted once per user by the operator:
 
@@ -40,8 +42,9 @@ curl -X POST https://your-gateway.example/v1/users \
 
 The simulator shares the Mac's network, so a gateway on your own machine is
 `http://127.0.0.1:<port>`. Against the lightsdk-gateway regtest stack (`regtest/`
-in the gateway repository), also select `regtest` and use
-`http://127.0.0.1:3002/blocks/tip/height` as the tip URL.
+in the gateway repository), also select `regtest`, start
+[`scripts/tip.mjs`](scripts/tip.mjs), and use
+`http://127.0.0.1:3003/blocks/tip/height` as the tip URL.
 [PAYMENT_TESTING.md](PAYMENT_TESTING.md) walks through a full local run.
 
 For scripted runs, every field can be set at launch, and `run` connects and
@@ -109,8 +112,8 @@ for, and `details`, and nothing else.
 
 **Spending needs a trusted chain tip.** `chainContextProvider` must read the tip
 height from an indexer for the chain the gateway runs on, never from the gateway.
-UTEXO's signet is not Bitcoin's public signet even though its invoices say `sb`;
-a public-signet tip is far behind it, and the signer rejects every spend.
+The stage gateway runs on Bitcoin's public signet. A tip from another chain is
+far off the gateway's height, and the signer rejects every spend.
 
 **RGB payments take three turns.** The receiver syncs to fetch, validate and
 ACK the consignment. The sender then syncs to see the ACK and broadcast. After a

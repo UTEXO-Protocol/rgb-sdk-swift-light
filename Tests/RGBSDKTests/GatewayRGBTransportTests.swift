@@ -159,6 +159,85 @@ private let rgbTxid = "e41e4ebdc769b0575126a5d728394d4c01206110e7eaebf6446029d5a
     }
 }
 
+@Test func gatewayRGBPassesProxyV1RecipientFieldsAndRequiresTheirExactEcho() async throws {
+    let invoice = try RGBInvoice(invoiceTestString(asset: invoiceTestAsset,
+        publicKey: invoiceTestPublicKey, encryption: "1"))
+    let decoded = try decodeRGBInvoiceLocally(invoice)
+    let request = try OnchainSendRequest(invoice: invoice, amount: AssetAmount(40))
+    let echoed: [String: Any] = ["assetId": decoded.assetID!.value, "amount": 40,
+        "recipientId": decoded.recipientID, "witnessAmountSat": NSNull(),
+        "transportEndpoints": decoded.transportEndpoints, "recipientPublicKey": invoiceTestPublicKey,
+        "recipientExpirationTimestamp": 87_400, "recipientEncryption": "optional"]
+    // A gateway that drops, nulls or alters what it passed on is caught before signing.
+    let mutations: [(inout [String: Any]) -> Void] = [
+        { _ in },
+        { $0.removeValue(forKey: "recipientPublicKey") },
+        { $0["recipientPublicKey"] = String(repeating: "b", count: 64) },
+        { $0["recipientExpirationTimestamp"] = 87_401 },
+        { $0["recipientEncryption"] = NSNull() },
+    ]
+    for (index, mutate) in mutations.enumerated() {
+        var asset = echoed; mutate(&asset)
+        var intent = try rgbIntent(); intent["asset"] = asset
+        let fixture = try await rgbFixture(request: request, responses: [try rgbPrepare(intent: intent)])
+        let context = OperationRequestContext(backend: fixture.context,
+            idempotencyKey: request.idempotencyKey,
+            requestHash: try RequestHasher.onchainSend(network: .regtest, request: request))
+        // Wire-only coverage: the returned blind fixture is deliberately never signed.
+        if index == 0 {
+            _ = try await fixture.backend.prepareOnchainSend(.init(context: context, request: request))
+        } else {
+            do {
+                _ = try await fixture.backend.prepareOnchainSend(.init(context: context, request: request))
+                Issue.record("changed proxy protocol 1.0 echo accepted")
+            } catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+        }
+        let requests = await fixture.transport.snapshot()
+        let data = try #require(requests.last?.body)
+        let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(body["recipientPublicKey"] as? String == invoiceTestPublicKey)
+        #expect(body["recipientExpirationTimestamp"] as? Int == 87_400)
+        #expect(body["recipientEncryption"] as? String == "optional")
+    }
+}
+
+@Test func gatewayRGBSendsNoProxyV1FieldsForAPreV1Invoice() async throws {
+    let invoice = try RGBInvoice(invoiceTestString(asset: invoiceTestAsset))
+    let decoded = try decodeRGBInvoiceLocally(invoice)
+    let request = try OnchainSendRequest(invoice: invoice, amount: AssetAmount(40))
+    let plain: [String: Any] = ["assetId": decoded.assetID!.value, "amount": 40,
+        "recipientId": decoded.recipientID, "witnessAmountSat": NSNull(),
+        "transportEndpoints": decoded.transportEndpoints]
+    // An older gateway omits the echo keys and a current one returns them as null;
+    // both match. A key the gateway invents for an invoice that has none does not.
+    let nulls: [String: Any] = ["recipientPublicKey": NSNull(),
+        "recipientExpirationTimestamp": NSNull(), "recipientEncryption": NSNull()]
+    let cases: [([String: Any], Bool)] = [
+        (plain, true),
+        (plain.merging(nulls) { $1 }, true),
+        (plain.merging(["recipientPublicKey": invoiceTestPublicKey]) { $1 }, false),
+    ]
+    for (asset, accepted) in cases {
+        var intent = try rgbIntent(); intent["asset"] = asset
+        let fixture = try await rgbFixture(request: request, responses: [try rgbPrepare(intent: intent)])
+        let context = OperationRequestContext(backend: fixture.context,
+            idempotencyKey: request.idempotencyKey,
+            requestHash: try RequestHasher.onchainSend(network: .regtest, request: request))
+        if accepted {
+            _ = try await fixture.backend.prepareOnchainSend(.init(context: context, request: request))
+        } else {
+            do {
+                _ = try await fixture.backend.prepareOnchainSend(.init(context: context, request: request))
+                Issue.record("invented recipient key accepted")
+            } catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+        }
+        let requests = await fixture.transport.snapshot()
+        let data = try #require(requests.last?.body)
+        let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(!body.keys.contains { $0.hasPrefix("recipient") && $0 != "recipientId" })
+    }
+}
+
 private actor RGBTestChainProvider: WalletChainContextProvider {
     let contexts: [WalletChainContext]
     private(set) var calls = 0

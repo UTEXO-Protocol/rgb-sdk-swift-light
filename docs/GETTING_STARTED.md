@@ -38,7 +38,8 @@ still work, but every new spend fails.
   and optional port, with no path. An rgb-node-api, Cloud API or Swap API URL won't
   work in its place.
 - **The network** your gateway runs. The SDK accepts `.mainnet`, `.testnet`,
-  `.signet` and `.regtest`. UTEXO's signet test environment uses `.signet`.
+  `.signet` and `.regtest`. UTEXO's stage gateway runs on Bitcoin's public
+  signet and uses `.signet`.
 - **For RGB, an asset contract ID** your gateway supports. The send path handles
   fungible assets (NIA, CFA and IFA). It can't send UDA assets, and it doesn't
   support BFA, which current Mint-issued USDT uses.
@@ -171,7 +172,7 @@ The SDK asks your app for the current block height before it signs anything.
 Read it from a node or indexer you trust, not from the gateway:
 
 ```swift
-struct EsploraChainTip: WalletChainContextProvider {
+struct HTTPChainTip: WalletChainContextProvider {
     let url: URL
 
     func loadChainContext(network: Network) async throws -> WalletChainContext {
@@ -190,10 +191,10 @@ struct EsploraChainTip: WalletChainContextProvider {
 The tip has to be from the chain your gateway runs on, and no more than 300
 seconds old. Stamp it with the time you actually read it.
 
-For UTEXO's signet, use `https://esplora-api.utexo.com/blocks/tip/height`.
-UTEXO's signet is its own chain, not Bitcoin's public signet, even though its
-invoices carry the `sb` signet tag. A public-signet tip is far behind it, and
-the signer rejects every spend with `policy.rejected`.
+UTEXO's stage gateway runs on Bitcoin's public signet; use a public-signet
+indexer such as `https://mempool.space/signet/api/blocks/tip/height`. A tip
+from another chain is far off the gateway's height, and the signer rejects every
+spend with `policy.rejected`.
 
 ### Open and unlock the wallet
 
@@ -201,7 +202,7 @@ the signer rejects every spend with `policy.rejected`.
 let service = try WalletServiceConfiguration(
     baseURL: gatewayURL,
     apiKeyProvider: apiKeyStore,
-    chainContextProvider: EsploraChainTip(url: tipURL)
+    chainContextProvider: HTTPChainTip(url: tipURL)
 )
 let storage = try WalletStorageConfiguration(
     directory: FileManager.default
@@ -310,9 +311,8 @@ let received = try await wallet.getBtcBalance().vanilla
 ```
 
 The payment shows in `received.future` once the receiver syncs, and in
-`received.settled` after it confirms. To look up a transaction on UTEXO's
-signet, use `https://esplora-api.utexo.com/tx/<txid>`. Public explorers such as
-mempool.space don't index that chain.
+`received.settled` after it confirms. To look up a transaction on the stage
+gateway's public signet, use `https://mempool.space/signet/tx/<txid>`.
 
 ## Send an RGB asset
 
@@ -418,8 +418,11 @@ let txid = sent.txid
   blind one. Its `amountSat` is the BTC that goes to the receiver's new output,
   at least 294 sats.
 - The invoice must carry between one and four transport endpoints, such as
-  `rpcs://rgb-proxy.utexo.com/json-rpc` on UTEXO's signet. Invoices without
-  endpoints aren't supported.
+  `rpcs://stage.rgb-proxy.utexo.com/json-rpc` on the stage gateway. Invoices
+  without endpoints aren't supported.
+- A proxy protocol 1.0 invoice also carries the receiver's key as `pk=…`, and
+  may carry `enc`. The SDK passes them to the gateway, which needs them to
+  encrypt the transfer to the receiver.
 
 `sent.batchTransferIndex` may be `nil`; use the txid to find the transfer.
 
@@ -545,7 +548,7 @@ covers the rest.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Every spend fails with `policy.rejected` | The chain tip is from the wrong chain or older than 300 seconds. On UTEXO's signet, read it from `esplora-api.utexo.com`, not a public-signet source. |
+| Every spend fails with `policy.rejected` | The chain tip is from the wrong chain or older than 300 seconds. For the stage gateway, read it from a public-signet source such as `mempool.space/signet/api`. |
 | Creating an invoice fails with `backend.protocol_mismatch` about expiry | The device and gateway clocks differ by more than 300 seconds. Fix the device clock. |
 | The first call fails with `backend.unavailable` | The gateway is still creating a newly registered wallet. Retry the call. |
 | `unlock()` fails with `wallet.key_access_failed` | No seed is stored for this wallet ID under the storage's `keychainService`. Provision it with the same service, or check the user's authentication for a protected seed. |

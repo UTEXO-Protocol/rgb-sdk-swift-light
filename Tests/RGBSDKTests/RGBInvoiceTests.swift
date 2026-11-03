@@ -8,18 +8,51 @@ let invoiceTestBlindPayload = "4vm1CX2Z-K8hMo59-e7dgGBS-Jka7mYn-Xe~yP85-yUiHHxr-
 let invoiceTestWitnessPayload = "A8cJ7Ww3-NIzADo3-Tzp_5aD-7CTBWmA-AAAAAAA-AAAAAAA-ALSQkcw"
 let invoiceTestAsset = "eIbQx5Am-XRDjj01-RM~5eo7-rv2nluD-OnBJRAy-S9~Yfts"
 let invoiceTestNiaSchema = "RWhwUfTMpuP2Zfx1~j4nswCANGeJrYOqDcKelaMV4zU"
+/// The recipient key of a proxy protocol 1.0 stage invoice (2026-11-02).
+let invoiceTestPublicKey = "bd92a92452c9c3fc2b4fa04e5e15fd922608b8e4ab6ba43a3c90c3cc866b791b"
 
+/// Query parameters follow the canonical order: assignment name, expiry, the
+/// proxy protocol 1.0 `pk` and `enc`, then endpoints.
 func invoiceTestString(
     network: String = "bcrt", witness: Bool = false, asset: String = "~", schema: String = "~",
     assignment: String = "~", expiry: UInt64? = 87_400,
-    endpoints: String? = "rpc://proxy.example", assignmentName: String? = nil
+    endpoints: String? = "rpc://proxy.example", assignmentName: String? = nil,
+    publicKey: String? = nil, encryption: String? = nil
 ) -> String {
     let recipient = "\(network):\(witness ? "wvout" : "utxob"):\(witness ? invoiceTestWitnessPayload : invoiceTestBlindPayload)"
     var query: [String] = []
     if let assignmentName { query.append("assignment_name=\(assignmentName)") }
     if let expiry { query.append("expiry=\(expiry)") }
+    if let publicKey { query.append("pk=\(publicKey)") }
+    if let encryption { query.append("enc=\(encryption)") }
     if let endpoints { query.append("endpoints=\(endpoints)") }
     return "rgb:\(asset)/\(schema)/\(assignment)/\(recipient)" + (query.isEmpty ? "" : "?" + query.joined(separator: "&"))
+}
+
+@Test func invoiceDecodesProxyV1KeyAndEncryptionAndRejectsAnyOtherKeyForm() throws {
+    let plain = try decodeRGBInvoiceLocally(RGBInvoice(invoiceTestString()))
+    #expect(plain.publicKey == nil && plain.encryption == .required)
+    let keyed = try decodeRGBInvoiceLocally(RGBInvoice(invoiceTestString(publicKey: invoiceTestPublicKey)))
+    #expect(keyed.publicKey == invoiceTestPublicKey && keyed.encryption == .required)
+    for (enc, expected) in [("0", InvoiceEncryption.unsupported), ("1", InvoiceEncryption.optional)] {
+        let decoded = try decodeRGBInvoiceLocally(RGBInvoice(
+            invoiceTestString(publicKey: invoiceTestPublicKey, encryption: enc)))
+        #expect(decoded.publicKey == invoiceTestPublicKey && decoded.encryption == expected)
+    }
+    let invalidKeys = [invoiceTestPublicKey.uppercased(), String(invoiceTestPublicKey.dropLast()),
+        invoiceTestPublicKey + "0", "g" + String(invoiceTestPublicKey.dropFirst())]
+    for invalid in invalidKeys {
+        #expect(throws: SDKError.self) {
+            try decodeRGBInvoiceLocally(RGBInvoice(invoiceTestString(publicKey: invalid)))
+        }
+    }
+    // Public construction enforces the same canonical key form as the decoder.
+    for invalid in invalidKeys + [""] {
+        #expect(throws: SDKError.self) {
+            try InvoiceData(invoice: plain.invoice, recipientID: plain.recipientID, network: .regtest,
+                assignment: plain.assignment, publicKey: invalid)
+        }
+    }
 }
 
 @Test func outgoingInvoiceChecksLiteralEncodedAmountRatherThanLossyPublicAssignment() throws {

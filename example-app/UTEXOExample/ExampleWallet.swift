@@ -1,8 +1,8 @@
 import Foundation
 import RGBSDK
 
-/// A minimal, readable integration of the UTEXO Swift SDK against a
-/// `minimal-gateway` deployment. Every SDK call the example makes is in this
+/// A minimal, readable integration of the UTEXO Swift SDK against a lightsdk
+/// gateway (`rln-gateway`) deployment. Every SDK call the example makes is in this
 /// file; `UTEXOExampleApp.swift` only lays out the screen.
 ///
 /// It covers the lifecycle an app actually has to get right:
@@ -128,7 +128,7 @@ final class ExampleWallet: ObservableObject {
             // it, so retry is still the contract.
             requestTimeout: 120,
             // Without it reads still work, but every new spend fails closed.
-            chainContextProvider: EsploraChainTip(url: Self.url(tipURL, field: "chain tip URL"))
+            chainContextProvider: HTTPChainTip(url: Self.url(tipURL, field: "chain tip URL"))
         )
         let storage = try WalletStorageConfiguration(
             directory: FileManager.default
@@ -403,10 +403,10 @@ final class ExampleWallet: ObservableObject {
 
 /// The signer bounds every prepared transaction against this tip, so it must
 /// come from a source the app trusts *independently of the gateway*: here an
-/// esplora-compatible `/blocks/tip/height` for the selected network. Never copy
+/// HTTP `/blocks/tip/height` for the selected network. Never copy
 /// a height out of a PSBT, and never restamp an old observation: the SDK
 /// rejects a tip older than 300 seconds.
-struct EsploraChainTip: WalletChainContextProvider {
+struct HTTPChainTip: WalletChainContextProvider {
     let url: URL
 
     func loadChainContext(network: Network) async throws -> WalletChainContext {
@@ -422,18 +422,18 @@ struct EsploraChainTip: WalletChainContextProvider {
 }
 
 enum Defaults {
-    /// Point this at your deployment. These defaults target UTEXO's signet
-    /// environment; for a gateway on your own machine use `http://127.0.0.1:<port>`.
-    static let gatewayURL = "https://minimal-gateway.utexo.com"
+    /// Point this at your deployment. These defaults target UTEXO's stage
+    /// gateway, on Bitcoin's public signet; for a gateway on your own machine
+    /// use `http://127.0.0.1:<port>`.
+    static let gatewayURL = "https://stage.gateway.lightsdk.utexo.com"
     static let network = Network.signet
     static let walletID = "example"
 
-    /// An esplora `/blocks/tip/height` for the chain the gateway runs on; it
-    /// must not be the gateway. UTEXO's gateways run on UTEXO's own signet,
-    /// which is NOT Bitcoin's public signet even though its invoices say `sb`:
-    /// a public-signet tip is hundreds of thousands of blocks behind it, and
-    /// the signer then refuses every transaction.
-    static let chainTipURL = "https://esplora-api.utexo.com/blocks/tip/height"
+    /// An HTTP `/blocks/tip/height` for the chain the gateway runs on; it must
+    /// not be the gateway. The stage gateway runs on Bitcoin's public signet. A
+    /// tip from another chain is far off the gateway's height, and the signer
+    /// then refuses every transaction. On regtest, `scripts/tip.mjs` serves one.
+    static let chainTipURL = "https://mempool.space/signet/api/blocks/tip/height"
 
     /// Explicit, because a gateway whose indexer has no fee data cannot estimate one.
     static let feeRateSatsPerVByte = 2
