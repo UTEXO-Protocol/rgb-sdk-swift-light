@@ -553,6 +553,17 @@ extension Network {
     }
 }
 
+extension InvoiceEncryption {
+    init(ffi: UtexoLocalSignerBindings.RgbInvoiceEncryption) {
+        self =
+            switch ffi {
+            case .required: .required
+            case .optional: .optional
+            case .unsupported: .unsupported
+            }
+    }
+}
+
 extension AccountKind {
     fileprivate var ffi: UtexoLocalSignerBindings.AccountKind {
         switch self {

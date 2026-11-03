@@ -523,6 +523,10 @@ public struct InvoiceData: Hashable, Sendable {
     public let assignmentName: String?
     public let expirationTimestamp: UnixSeconds?
     public let transportEndpoints: [String]
+    /// Recipient's Ed25519 key (64 lowercase hex), the proxy protocol 1.0 `pk` parameter.
+    public let publicKey: String?
+    /// The proxy protocol 1.0 `enc` parameter; an invoice without it requires encryption.
+    public let encryption: InvoiceEncryption
 
     public init(
         invoice: RGBInvoice,
@@ -533,7 +537,9 @@ public struct InvoiceData: Hashable, Sendable {
         assignment: Assignment,
         assignmentName: String? = nil,
         expirationTimestamp: UnixSeconds? = nil,
-        transportEndpoints: [String] = []
+        transportEndpoints: [String] = [],
+        publicKey: String? = nil,
+        encryption: InvoiceEncryption = .required
     ) throws {
         self.invoice = invoice
         self.recipientID = try requireBoundedText(
@@ -548,7 +554,41 @@ public struct InvoiceData: Hashable, Sendable {
         self.assignmentName = assignmentName
         self.expirationTimestamp = expirationTimestamp
         self.transportEndpoints = transportEndpoints
+        if let publicKey, !isASCIIHex(publicKey, exactByteCount: 64, lowercaseOnly: true) {
+            throw SDKError.invalidArgument("publicKey", "must be exactly 32 lowercase ASCII hex bytes")
+        }
+        self.publicKey = publicKey
+        self.encryption = encryption
     }
+
+    /// The initializer from before the proxy protocol 1.0 fields, kept so code
+    /// built against an earlier release still links.
+    @_disfavoredOverload
+    public init(
+        invoice: RGBInvoice,
+        recipientID: String,
+        assetSchema: String? = nil,
+        assetID: AssetID? = nil,
+        network: Network,
+        assignment: Assignment,
+        assignmentName: String? = nil,
+        expirationTimestamp: UnixSeconds? = nil,
+        transportEndpoints: [String] = []
+    ) throws {
+        try self.init(
+            invoice: invoice, recipientID: recipientID, assetSchema: assetSchema, assetID: assetID,
+            network: network, assignment: assignment, assignmentName: assignmentName,
+            expirationTimestamp: expirationTimestamp, transportEndpoints: transportEndpoints,
+            publicKey: nil, encryption: .required
+        )
+    }
+}
+
+/// Consignment encryption preference of an RGB invoice recipient (proxy protocol 1.0).
+public enum InvoiceEncryption: String, Codable, CaseIterable, Sendable {
+    case required
+    case optional
+    case unsupported
 }
 
 // Familiar aliases for teams sharing DTO terminology with Kotlin/RN.

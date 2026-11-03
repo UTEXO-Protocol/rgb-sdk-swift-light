@@ -827,22 +827,37 @@ public actor GatewayWalletBackend: WalletBackend {
         guard let assetID = request.assetID ?? invoice.assetID,
               let amount = UInt64(request.amount.decimal), amount <= Self.javascriptMaximumSafeInteger,
               (1...4).contains(invoice.transportEndpoints.count),
-              invoice.transportEndpoints.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 2_048 }) else {
+              invoice.transportEndpoints.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 2_048 }),
+              invoice.expirationTimestamp.map({ $0.rawValue <= Self.javascriptMaximumSafeInteger }) ?? true else {
             throw SDKError.invalidArgument("invoice", "exceeds the gateway asset or transport domain")
         }
+        // The proxy protocol 1.0 recipient fields rgb-node-api needs to encrypt the
+        // consignment to the recipient. A pre-1.0 invoice sends none of them, so it
+        // keeps working with a gateway that predates these fields and rejects
+        // unknown request fields.
+        let proxyV1 = invoice.publicKey != nil || invoice.encryption != .required
         return .init(assetId: assetID.value, amount: amount, recipientId: invoice.recipientID,
             witnessAmountSat: request.witnessData?.amountSat.value,
-            transportEndpoints: invoice.transportEndpoints, donation: request.donation,
+            transportEndpoints: invoice.transportEndpoints,
+            recipientPublicKey: proxyV1 ? invoice.publicKey : nil,
+            recipientExpirationTimestamp: proxyV1 ? invoice.expirationTimestamp?.rawValue : nil,
+            recipientEncryption: proxyV1 && invoice.encryption != .required ? invoice.encryption.rawValue : nil,
+            donation: request.donation,
             minConfirmations: request.minConfirmations.rawValue,
             feeRateSatPerVb: try gatewayFeeRate(request.feeRate))
     }
 
     private func validateAssetIntent(_ intent: PreparedIntent, request: PrepareSendAssetBody) throws {
+        // The gateway echoes the proxy protocol 1.0 recipient fields it passed on. A
+        // gateway predating them omits the keys, which matches only when none were sent.
         guard intent.kind == "send_asset", intent.recipients.isEmpty, intent.utxos == nil,
               intent.feeRateSatPerVb == request.feeRateSatPerVb, let asset = intent.asset,
               asset.assetId == request.assetId, asset.amount == request.amount,
               asset.recipientId == request.recipientId, asset.witnessAmountSat == request.witnessAmountSat,
-              asset.transportEndpoints == request.transportEndpoints else {
+              asset.transportEndpoints == request.transportEndpoints,
+              asset.recipientPublicKey == request.recipientPublicKey,
+              asset.recipientExpirationTimestamp == request.recipientExpirationTimestamp,
+              asset.recipientEncryption == request.recipientEncryption else {
             throw SDKError.backendProtocolMismatch("prepare intent changed the requested RGB recipient, asset or amount")
         }
     }
@@ -1650,6 +1665,10 @@ private struct PrepareSendAssetBody: Encodable {
     let recipientId: String
     let witnessAmountSat: UInt64?
     let transportEndpoints: [String]
+    // Synthesized encoding omits nil, so a pre-1.0 invoice sends none of these keys.
+    let recipientPublicKey: String?
+    let recipientExpirationTimestamp: UInt64?
+    let recipientEncryption: String?
     let donation: Bool
     let minConfirmations: UInt32
     let feeRateSatPerVb: UInt64
@@ -1718,8 +1737,12 @@ private struct AssetIntent: Decodable {
     let recipientId: String
     let witnessAmountSat: UInt64?
     let transportEndpoints: [String]
+    let recipientPublicKey: String?
+    let recipientExpirationTimestamp: UInt64?
+    let recipientEncryption: String?
     private enum CodingKeys: String, CodingKey {
         case assetId, amount, recipientId, witnessAmountSat, transportEndpoints
+        case recipientPublicKey, recipientExpirationTimestamp, recipientEncryption
     }
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1728,6 +1751,11 @@ private struct AssetIntent: Decodable {
         recipientId = try container.decode(String.self, forKey: .recipientId)
         witnessAmountSat = try container.decode(UInt64?.self, forKey: .witnessAmountSat)
         transportEndpoints = try container.decode([String].self, forKey: .transportEndpoints)
+        // Proxy protocol 1.0 echoes: a gateway predating them omits the keys, a
+        // current one returns null when nothing was passed on.
+        recipientPublicKey = try container.decodeIfPresent(String.self, forKey: .recipientPublicKey)
+        recipientExpirationTimestamp = try container.decodeIfPresent(UInt64.self, forKey: .recipientExpirationTimestamp)
+        recipientEncryption = try container.decodeIfPresent(String.self, forKey: .recipientEncryption)
     }
 }
 
@@ -1796,6 +1824,8 @@ private func fixedGatewayMessage(for code: String?) -> String {
         "The gateway rejected the watch-only keys"
     case "INVALID_ADDRESS":
         "The gateway rejected the recipient address"
+    case "INVALID_RECIPIENT_PUBLIC_KEY":
+        "The gateway wallet rejected the recipient invoice's public key"
     case "INSUFFICIENT_FUNDS":
         "The wallet has insufficient funds for this operation"
     case "PSBT_REJECTED", "PSBT_MISMATCH":

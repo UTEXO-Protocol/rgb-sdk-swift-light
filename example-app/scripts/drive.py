@@ -10,7 +10,7 @@ Examples:
   drive.py --token-file user-a.json --wallet gw-a address,balance
   drive.py --token-file user-a.json --wallet gw-a sendbtc recipient=tb1p... amount=50000
   drive.py --gateway http://127.0.0.1:8490 --network regtest \\
-      --tip-url http://127.0.0.1:3002/blocks/tip/height \\
+      --tip-url http://127.0.0.1:3003/blocks/tip/height \\
       --token-file local-a.json --wallet loc-a sync,assets
 
 Fields passed as `name=value` reach the app too: recipient, amount, assetId.
@@ -44,11 +44,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("actions", help="comma-separated actions, e.g. sync,balance")
     parser.add_argument("fields", nargs="*", help="name=value fields (recipient, amount, assetId)")
-    parser.add_argument("--gateway", default=os.environ.get("UTEXO_GATEWAY_URL", "https://minimal-gateway.utexo.com"))
+    parser.add_argument("--gateway", default=os.environ.get("UTEXO_GATEWAY_URL", "https://stage.gateway.lightsdk.utexo.com"))
     parser.add_argument("--token-file", help="bare token, or the JSON returned by POST /v1/users")
     parser.add_argument("--wallet", required=True, help="wallet ID; one Keychain seed per ID and network")
     parser.add_argument("--network", help="signet (app default), regtest, testnet, mainnet")
-    parser.add_argument("--tip-url", help="esplora /blocks/tip/height for the gateway's chain")
+    parser.add_argument("--tip-url", help="an HTTP /blocks/tip/height for the gateway's chain (tip.mjs on regtest)")
     parser.add_argument("--restore-from", help="file holding a mnemonic to restore on first connect")
     parser.add_argument("--mnemonic-out", help="where to save a newly generated mnemonic")
     parser.add_argument("--device", default="booted", help="simulator UDID or name (default: the booted one)")

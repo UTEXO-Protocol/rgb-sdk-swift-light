@@ -88,7 +88,8 @@ private func decodeNativeRGBInvoice(
                 network: Network(ffi: decoded.network),
                 assignment: Assignment(type: type, amount: decoded.assignment.amount.map(AssetAmount.init)),
                 assignmentName: decoded.assignmentName, expirationTimestamp: expiration,
-                transportEndpoints: decoded.transportEndpoints
+                transportEndpoints: decoded.transportEndpoints,
+                publicKey: decoded.publicKey, encryption: InvoiceEncryption(ffi: decoded.encryption)
             ),
             decoded.recipientType == .witness,
             decoded.encodedState

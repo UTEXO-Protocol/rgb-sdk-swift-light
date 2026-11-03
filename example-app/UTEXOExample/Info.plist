@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<!-- Cleartext HTTP to the Mac's loopback only, for a local gateway and
-	     esplora (http://127.0.0.1:…). Everything else stays HTTPS. -->
+	     regtest tip server (http://127.0.0.1:…). Everything else stays HTTPS. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

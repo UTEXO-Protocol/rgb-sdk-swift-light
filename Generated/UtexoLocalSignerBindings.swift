@@ -1040,10 +1040,20 @@ package struct DecodedRgbInvoice: Equatable, Hashable {
     package var assignmentName: String?
     package var expirationTimestamp: Int64?
     package var transportEndpoints: [String]
+    /**
+     * Recipient's Ed25519 public key (64 lowercase hex characters), the
+     * proxy protocol 1.0 `pk` parameter a sender encrypts the consignment to.
+     */
+    package var publicKey: String?
+    package var encryption: RgbInvoiceEncryption
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    package init(recipientId: String, recipientType: RgbInvoiceRecipientType, assetSchema: String?, assetId: String?, network: Network, assignment: RgbInvoiceAssignment, encodedState: RgbInvoiceEncodedState, assignmentName: String?, expirationTimestamp: Int64?, transportEndpoints: [String]) {
+    package init(recipientId: String, recipientType: RgbInvoiceRecipientType, assetSchema: String?, assetId: String?, network: Network, assignment: RgbInvoiceAssignment, encodedState: RgbInvoiceEncodedState, assignmentName: String?, expirationTimestamp: Int64?, transportEndpoints: [String], 
+        /**
+         * Recipient's Ed25519 public key (64 lowercase hex characters), the
+         * proxy protocol 1.0 `pk` parameter a sender encrypts the consignment to.
+         */publicKey: String?, encryption: RgbInvoiceEncryption) {
         self.recipientId = recipientId
         self.recipientType = recipientType
         self.assetSchema = assetSchema
@@ -1054,6 +1064,8 @@ package struct DecodedRgbInvoice: Equatable, Hashable {
         self.assignmentName = assignmentName
         self.expirationTimestamp = expirationTimestamp
         self.transportEndpoints = transportEndpoints
+        self.publicKey = publicKey
+        self.encryption = encryption
     }
 
     
@@ -1081,7 +1093,9 @@ package struct FfiConverterTypeDecodedRgbInvoice: FfiConverterRustBuffer {
                 encodedState: FfiConverterTypeRgbInvoiceEncodedState.read(from: &buf), 
                 assignmentName: FfiConverterOptionString.read(from: &buf), 
                 expirationTimestamp: FfiConverterOptionInt64.read(from: &buf), 
-                transportEndpoints: FfiConverterSequenceString.read(from: &buf)
+                transportEndpoints: FfiConverterSequenceString.read(from: &buf), 
+                publicKey: FfiConverterOptionString.read(from: &buf), 
+                encryption: FfiConverterTypeRgbInvoiceEncryption.read(from: &buf)
         )
     }
 
@@ -1096,6 +1110,8 @@ package struct FfiConverterTypeDecodedRgbInvoice: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.assignmentName, into: &buf)
         FfiConverterOptionInt64.write(value.expirationTimestamp, into: &buf)
         FfiConverterSequenceString.write(value.transportEndpoints, into: &buf)
+        FfiConverterOptionString.write(value.publicKey, into: &buf)
+        FfiConverterTypeRgbInvoiceEncryption.write(value.encryption, into: &buf)
     }
 }
 
@@ -2652,6 +2668,84 @@ package func FfiConverterTypeRgbInvoiceEncodedStateKind_lift(_ buf: RustBuffer) 
 #endif
 package func FfiConverterTypeRgbInvoiceEncodedStateKind_lower(_ value: RgbInvoiceEncodedStateKind) -> RustBuffer {
     return FfiConverterTypeRgbInvoiceEncodedStateKind.lower(value)
+}
+
+
+
+/**
+ * Consignment and media encryption preference of an invoice recipient, the
+ * proxy protocol 1.0 `enc` parameter. An invoice without `enc` requires
+ * encryption; `enc=1` makes it optional and `enc=0` refuses it.
+ */
+
+package enum RgbInvoiceEncryption: Equatable, Hashable {
+    
+    case required
+    case optional
+    case unsupported
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RgbInvoiceEncryption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package struct FfiConverterTypeRgbInvoiceEncryption: FfiConverterRustBuffer {
+    typealias SwiftType = RgbInvoiceEncryption
+
+    package static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RgbInvoiceEncryption {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .required
+        
+        case 2: return .optional
+        
+        case 3: return .unsupported
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    package static func write(_ value: RgbInvoiceEncryption, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .required:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .optional:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncryption_lift(_ buf: RustBuffer) throws -> RgbInvoiceEncryption {
+    return try FfiConverterTypeRgbInvoiceEncryption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+package func FfiConverterTypeRgbInvoiceEncryption_lower(_ value: RgbInvoiceEncryption) -> RustBuffer {
+    return FfiConverterTypeRgbInvoiceEncryption.lower(value)
 }
 
 
