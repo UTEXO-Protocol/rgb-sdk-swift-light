@@ -281,7 +281,7 @@ final class ExampleWallet: ObservableObject {
 
     private func assets(_ wallet: UTEXOWallet) async throws {
         let assets = try await wallet.listAssets()
-        line("\(assets.nia.count + assets.cfa.count + assets.ifa.count + assets.uda.count) asset(s)")
+        line("\(assets.nia.count + assets.cfa.count + assets.ifa.count + assets.uda.count + assets.bfa.count) asset(s)")
         func show(_ schema: String, _ id: AssetID, _ label: String, _ balance: AssetBalance) {
             line(
                 "  \(schema) \(id.value)  \(label)  settled=\(balance.settled?.decimal ?? "-") "
@@ -292,6 +292,7 @@ final class ExampleWallet: ObservableObject {
         for asset in assets.ifa { show("IFA", asset.assetID, asset.ticker, asset.balance) }
         for asset in assets.cfa { show("CFA", asset.assetID, asset.name, asset.balance) }
         for asset in assets.uda { show("UDA", asset.assetID, asset.ticker, asset.balance) }
+        for asset in assets.bfa { show("BFA", asset.assetID, asset.ticker, asset.balance) }
     }
 
     private func transfers(_ wallet: UTEXOWallet) async throws {

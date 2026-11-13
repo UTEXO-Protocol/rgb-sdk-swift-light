@@ -137,12 +137,36 @@ private let readTxid = String(repeating: "a", count: 64)
 }
 
 @Test func gatewayAssetsSupportAllSchemasWithAbsentIfaSupplies() async throws {
-    let (backend, context, _) = try await readBackend([readJSON(["assets": ["nia", "cfa", "ifa", "uda"].map(readAsset)])])
+    let (backend, context, _) = try await readBackend([readJSON(["assets": ["nia", "cfa", "ifa", "uda", "bfa"].map(readAsset)])])
     let result = try await backend.listAssets(context: context)
-    #expect(result.nia.count == 1 && result.cfa.count == 1 && result.ifa.count == 1 && result.uda.count == 1)
+    #expect(result.nia.count == 1 && result.cfa.count == 1 && result.ifa.count == 1 && result.uda.count == 1 && result.bfa.count == 1)
     #expect(result.nia[0].issuedSupply == AssetAmount(100))
     #expect(result.ifa[0].initialSupply == nil && result.ifa[0].maximumSupply == nil && result.ifa[0].knownCirculatingSupply == nil)
     #expect(result.ifa[0].balance.settled == AssetAmount(3) && result.ifa[0].media == nil)
+}
+
+@Test func gatewayBfaAssetsAreListedBesideOtherSchemasAndMayReportZeroOrNoGenesisSupply() async throws {
+    var bridged = readAsset("bfa")
+    bridged["ticker"] = "BUSDT"; bridged["name"] = "Bridged USDT"; bridged["precision"] = 6
+    bridged["balance"] = ["settled": 10_000, "future": 10_000, "spendable": 10_000]
+    let (backend, context, _) = try await readBackend([readJSON(["assets": [readAsset("nia"), bridged]])])
+    let result = try await backend.listAssets(context: context)
+    #expect(result.nia.count == 1)
+    let asset = try #require(result.bfa.first)
+    #expect(result.bfa.count == 1 && asset.assetID.value == "bfa-asset")
+    #expect(asset.ticker == "BUSDT" && asset.name == "Bridged USDT" && asset.precision == 6)
+    #expect(asset.issuedSupply == AssetAmount(0) && asset.balance.settled == AssetAmount(10_000))
+    // rgb-lib-bfa bfa.6+ reports no genesis supply for BFA, so the gateway sends null.
+    var unreported = bridged; unreported["issuedSupply"] = NSNull()
+    let (unreportedBackend, unreportedContext, _) = try await readBackend([readJSON(["assets": [unreported]])])
+    let withoutSupply = try #require(try await unreportedBackend.listAssets(context: unreportedContext).bfa.first)
+    #expect(withoutSupply.issuedSupply == nil && withoutSupply.balance.settled == AssetAmount(10_000))
+    for (field, value) in [("ticker", NSNull()), ("issuedSupply", -1)] as [(String, Any)] {
+        var record = bridged; record[field] = value
+        let (backend, context, _) = try await readBackend([readJSON(["assets": [record]])])
+        do { _ = try await backend.listAssets(context: context); Issue.record("invalid BFA asset must fail") }
+        catch let error as SDKError { #expect(error.code == .backendProtocolMismatch) }
+    }
 }
 
 @Test func gatewayAssetsRejectInvalidRequiredMetadataAndDoNotDropUnknownSchemas() async throws {
@@ -197,21 +221,22 @@ private let readTxid = String(repeating: "a", count: 64)
     let other = String(repeating: "b", count: 64)
     let (backend, context, transport) = try await readBackend([
         readJSON(["transfers": [readTransfer(index: 5, assetID: nil, txid: nil, status: "WaitingCounterparty")]]),
-        readJSON(["assets": ["nia", "ifa", "cfa", "uda"].map(readAsset)]),
+        readJSON(["assets": ["nia", "ifa", "cfa", "uda", "bfa"].map(readAsset)]),
         readJSON(["transfers": [readTransfer(index: 3, assetID: "nia-asset")]]),
         readJSON(["transfers": [Any]()]),
         readJSON(["transfers": [readTransfer(index: 1, assetID: "ifa-asset", txid: other)]]),
         readJSON(["transfers": [readTransfer(index: 2, assetID: "uda-asset", txid: other)]]),
+        readJSON(["transfers": [readTransfer(index: 4, assetID: "bfa-asset")]]),
     ])
     let result = try await backend.listTransfers(context: context, assetID: nil)
-    #expect(result.map(\.index) == [1, 2, 3, 5])
-    #expect(result.map(\.assetID?.value) == ["ifa-asset", "uda-asset", "nia-asset", nil])
+    #expect(result.map(\.index) == [1, 2, 3, 4, 5])
+    #expect(result.map(\.assetID?.value) == ["ifa-asset", "uda-asset", "nia-asset", "bfa-asset", nil])
     #expect(result.last?.status == .waitingCounterparty)
     let requests = await transport.snapshot()
     #expect(requests.map(\.url.path) == ["/v1/me", "/v1/wallet/transfers", "/v1/wallet/balances",
-        "/v1/wallet/transfers", "/v1/wallet/transfers", "/v1/wallet/transfers", "/v1/wallet/transfers"])
+        "/v1/wallet/transfers", "/v1/wallet/transfers", "/v1/wallet/transfers", "/v1/wallet/transfers", "/v1/wallet/transfers"])
     #expect(requests.map(\.url.query) == [nil, nil, nil,
-        "assetId=nia-asset", "assetId=cfa-asset", "assetId=ifa-asset", "assetId=uda-asset"])
+        "assetId=nia-asset", "assetId=cfa-asset", "assetId=ifa-asset", "assetId=uda-asset", "assetId=bfa-asset"])
 }
 
 @Test func gatewayTransfersByTxidFindAnAssetSendThatTheAssetLessPageOmits() async throws {
@@ -305,8 +330,13 @@ private func readUnspent() -> [String: Any] {
 }
 
 private func readAsset(_ schema: String) -> [String: Any] {
-    ["assetId": schema + "-asset", "schema": schema, "ticker": "TEST", "name": "Test",
-     "precision": 0, "issuedSupply": schema == "nia" || schema == "cfa" ? 100 : NSNull(),
+    let issuedSupply: Any = switch schema {
+    case "nia", "cfa": 100
+    case "bfa": 0 // As a bridged asset reports it.
+    default: NSNull()
+    }
+    return ["assetId": schema + "-asset", "schema": schema, "ticker": "TEST", "name": "Test",
+     "precision": 0, "issuedSupply": issuedSupply,
      "timestamp": 1, "addedAt": 2, "details": NSNull(),
      "balance": ["settled": 3, "future": 4, "spendable": 2]]
 }
