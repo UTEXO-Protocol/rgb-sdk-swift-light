@@ -26,10 +26,9 @@ The project links the `RGBSDK` product of this repository's root package, so
 it builds against the committed binary facade. For a physical device, set your
 development team on the target first.
 
-Launch the app, paste a gateway URL and a bearer token, and press **Connect**.
-The defaults target UTEXO's stage gateway,
-`https://stage.gateway.lightsdk.utexo.com`, on Bitcoin's public signet:
-`Network.signet`, with the trusted chain tip read from
+Launch the app, paste the gateway URL UTEXO gave you and a bearer token, and
+press **Connect**. The other defaults suit UTEXO's signet gateway, which runs on
+Bitcoin's public signet: `Network.signet`, with the trusted chain tip read from
 `https://mempool.space/signet/api/blocks/tip/height`.
 
 A token is minted once per user by the operator:
@@ -112,8 +111,8 @@ for, and `details`, and nothing else.
 
 **Spending needs a trusted chain tip.** `chainContextProvider` must read the tip
 height from an indexer for the chain the gateway runs on, never from the gateway.
-The stage gateway runs on Bitcoin's public signet. A tip from another chain is
-far off the gateway's height, and the signer rejects every spend.
+UTEXO's signet gateway runs on Bitcoin's public signet. A tip from another chain
+is far off the gateway's height, and the signer rejects every spend.
 
 **RGB payments take three turns.** The receiver syncs to fetch, validate and
 ACK the consignment. The sender then syncs to see the ACK and broadcast. After a

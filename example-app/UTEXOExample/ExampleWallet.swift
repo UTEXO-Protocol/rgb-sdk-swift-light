@@ -423,17 +423,20 @@ struct HTTPChainTip: WalletChainContextProvider {
 }
 
 enum Defaults {
-    /// Point this at your deployment. These defaults target UTEXO's stage
-    /// gateway, on Bitcoin's public signet; for a gateway on your own machine
-    /// use `http://127.0.0.1:<port>`.
-    static let gatewayURL = "https://stage.gateway.lightsdk.utexo.com"
+    /// Empty: enter the gateway URL UTEXO provisioned for you, or set the
+    /// `gatewayUrl` launch argument. For a gateway on your own machine use
+    /// `http://127.0.0.1:<port>`. The other defaults suit UTEXO's signet
+    /// gateway, which runs on Bitcoin's public signet.
+    static let gatewayURL = ""
+    static let gatewayURLHint = "gateway base URL, e.g. https://your-gateway.example"
     static let network = Network.signet
     static let walletID = "example"
 
     /// An HTTP `/blocks/tip/height` for the chain the gateway runs on; it must
-    /// not be the gateway. The stage gateway runs on Bitcoin's public signet. A
-    /// tip from another chain is far off the gateway's height, and the signer
-    /// then refuses every transaction. On regtest, `scripts/tip.mjs` serves one.
+    /// not be the gateway. UTEXO's signet gateway runs on Bitcoin's public
+    /// signet. A tip from another chain is far off the gateway's height, and the
+    /// signer then refuses every transaction. On regtest, `scripts/tip.mjs`
+    /// serves one.
     static let chainTipURL = "https://mempool.space/signet/api/blocks/tip/height"
 
     /// Explicit, because a gateway whose indexer has no fee data cannot estimate one.
