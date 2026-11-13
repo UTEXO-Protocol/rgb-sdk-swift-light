@@ -16,7 +16,7 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                field("gateway base URL", text: $model.gatewayURL)
+                field(Defaults.gatewayURLHint, text: $model.gatewayURL)
                 SecureField("bearer token (utxg_…)", text: $model.bearerToken)
                     .textFieldStyle(.roundedBorder)
                 field("wallet ID", text: $model.walletID)
