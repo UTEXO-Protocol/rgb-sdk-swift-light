@@ -21,7 +21,7 @@ The gateway prepares transactions and manages state, synchronization, and submis
 
 **Lightweight means server-assisted RGB state.** The SDK's local invoice checks and Bitcoin signing do not validate a full RGB transition or prove asset allocations. Balances and RGB state are gateway assertions; `localRGBValidation` is `false`.
 
-The gateway handles on-chain Bitcoin and RGB only, so this Swift facade has **no Lightning channel, Lightning invoice, or Lightning payment API**. Its asset listing recognizes NIA, CFA, UDA, and IFA; BFA assets used by [current Mint-issued USDT](https://docs.utexo.com/getting-started/rgb-concepts) are outside this profile. Obtain a compatible asset ID and schema from UTEXO before integrating a particular token.
+The gateway handles on-chain Bitcoin and RGB only, so this Swift facade has **no Lightning channel, Lightning invoice, or Lightning payment API**. Its asset listing recognizes NIA, CFA, UDA, IFA, and BFA. [Current Mint-issued USDT](https://docs.utexo.com/getting-started/rgb-concepts) uses BFA. If your gateway's wallet service has BFA enabled, a wallet can request it with or without its asset ID, and `listAssets()` returns it in `bfa`. The local signer recognizes the BFA schema ID that `rgb-lib-bfa` `bfa.5` emits and rejects an invoice naming any other. Sending BFA hasn't been tested. Obtain a compatible asset ID and schema from UTEXO before integrating a particular token.
 
 ## 1. Install the package
 

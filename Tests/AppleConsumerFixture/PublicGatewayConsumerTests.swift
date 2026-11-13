@@ -92,7 +92,7 @@ final class PublicGatewayConsumerTests: XCTestCase {
             let unspents = try await wallet.listUnspents()
             XCTAssertTrue(unspents.isEmpty)
             let assets = try await wallet.listAssets()
-            XCTAssertTrue(assets.nia.isEmpty && assets.cfa.isEmpty && assets.ifa.isEmpty && assets.uda.isEmpty)
+            XCTAssertTrue(assets.nia.isEmpty && assets.cfa.isEmpty && assets.ifa.isEmpty && assets.uda.isEmpty && assets.bfa.isEmpty)
             let transfers = try await wallet.listTransfers()
             let filtered = try await wallet.listTransfersByTxid(TransactionID(String(repeating: "a", count: 64)))
             let onchainTransfers = try await wallet.listOnchainTransfers()

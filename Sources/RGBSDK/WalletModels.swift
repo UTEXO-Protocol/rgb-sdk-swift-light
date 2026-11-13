@@ -405,6 +405,50 @@ public struct AssetIFA: Hashable, Sendable {
     }
 }
 
+public struct AssetBFA: Hashable, Sendable {
+    public let assetID: AssetID
+    public let ticker: String
+    public let name: String
+    public let precision: UInt8
+    /// Genesis supply, or nil when the wallet service reports none. rgb-lib-bfa from bfa.6 has no
+    /// genesis supply for BFA: its known circulating supply is the amount locked on the bridge
+    /// contract, a different quantity, so it is never reported here. Never inferred from the balance.
+    public let issuedSupply: AssetAmount?
+    public let timestamp: UnixSeconds
+    public let addedAt: UnixSeconds
+    public let balance: AssetBalance
+    public let details: String?
+    public let media: Media?
+    public let rejectListURL: URL?
+
+    public init(
+        assetID: AssetID,
+        ticker: String,
+        name: String,
+        precision: UInt8,
+        issuedSupply: AssetAmount?,
+        timestamp: UnixSeconds,
+        addedAt: UnixSeconds,
+        balance: AssetBalance,
+        details: String? = nil,
+        media: Media? = nil,
+        rejectListURL: URL? = nil
+    ) throws {
+        guard precision <= 18 else { throw SDKError.invalidArgument("precision", "must be between 0 and 18") }
+        self.assetID = assetID
+        self.ticker = try requireBoundedText(ticker, field: "ticker", maximumUTF8Bytes: 16)
+        self.name = try requireBoundedDisplayText(name, field: "name", maximumUTF8Bytes: 256)
+        self.precision = precision
+        self.issuedSupply = issuedSupply
+        self.timestamp = timestamp
+        self.addedAt = addedAt
+        self.balance = balance
+        self.details = details
+        self.media = media
+        self.rejectListURL = rejectListURL
+    }
+}
+
 public struct AssetCFA: Hashable, Sendable {
     public let assetID: AssetID
     public let name: String
@@ -477,16 +521,31 @@ public struct ListAssets: Hashable, Sendable {
     public let uda: [AssetUDA]
     public let cfa: [AssetCFA]
     public let ifa: [AssetIFA]
+    public let bfa: [AssetBFA]
+    public init(
+        nia: [AssetNIA] = [],
+        uda: [AssetUDA] = [],
+        cfa: [AssetCFA] = [],
+        ifa: [AssetIFA] = [],
+        bfa: [AssetBFA] = []
+    ) {
+        self.nia = nia
+        self.uda = uda
+        self.cfa = cfa
+        self.ifa = ifa
+        self.bfa = bfa
+    }
+
+    /// The initializer from before BFA, kept so code built against an earlier
+    /// release still links.
+    @_disfavoredOverload
     public init(
         nia: [AssetNIA] = [],
         uda: [AssetUDA] = [],
         cfa: [AssetCFA] = [],
         ifa: [AssetIFA] = []
     ) {
-        self.nia = nia
-        self.uda = uda
-        self.cfa = cfa
-        self.ifa = ifa
+        self.init(nia: nia, uda: uda, cfa: cfa, ifa: ifa, bfa: [])
     }
 }
 
@@ -598,5 +657,6 @@ public typealias RgbAllocation = RGBAllocation
 public typealias Utxo = UTXO
 public typealias AssetNia = AssetNIA
 public typealias AssetIfa = AssetIFA
+public typealias AssetBfa = AssetBFA
 public typealias AssetCfa = AssetCFA
 public typealias AssetUda = AssetUDA

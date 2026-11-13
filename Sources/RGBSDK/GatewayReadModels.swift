@@ -140,7 +140,7 @@ struct GatewayAssetsWire: Decodable {
     }
 
     func model() throws -> ListAssets {
-        var nia: [AssetNIA] = [], ifa: [AssetIFA] = [], cfa: [AssetCFA] = [], uda: [AssetUDA] = []
+        var nia: [AssetNIA] = [], ifa: [AssetIFA] = [], cfa: [AssetCFA] = [], uda: [AssetUDA] = [], bfa: [AssetBFA] = []
         var ids = Set<AssetID>()
         for asset in assets {
             let id = try gatewayAssetID(asset.assetId)
@@ -182,11 +182,16 @@ struct GatewayAssetsWire: Decodable {
                 guard let ticker else { throw SDKError.backendProtocolMismatch("UDA asset lacks ticker") }
                 uda.append(try AssetUDA(assetID: id, ticker: ticker, name: name, precision: asset.precision,
                     timestamp: timestamp, addedAt: addedAt, balance: balance, details: asset.details))
+            case "bfa":
+                guard let ticker else { throw SDKError.backendProtocolMismatch("BFA asset lacks ticker") }
+                bfa.append(try AssetBFA(assetID: id, ticker: ticker, name: name, precision: asset.precision,
+                    issuedSupply: asset.issuedSupply.map(AssetAmount.init), timestamp: timestamp, addedAt: addedAt,
+                    balance: balance, details: asset.details))
             default:
                 throw SDKError.backendProtocolMismatch("gateway returned an unsupported asset schema")
             }
         }
-        return ListAssets(nia: nia, uda: uda, cfa: cfa, ifa: ifa)
+        return ListAssets(nia: nia, uda: uda, cfa: cfa, ifa: ifa, bfa: bfa)
     }
 }
 

@@ -41,8 +41,9 @@ still work, but every new spend fails.
   `.signet` and `.regtest`. UTEXO's stage gateway runs on Bitcoin's public
   signet and uses `.signet`.
 - **For RGB, an asset contract ID** your gateway supports. The send path handles
-  fungible assets (NIA, CFA and IFA). It can't send UDA assets, and it doesn't
-  support BFA, which current Mint-issued USDT uses.
+  fungible assets (NIA, CFA and IFA). It can't send UDA assets. BFA, which current
+  Mint-issued USDT uses, can be received and listed if your gateway enables it.
+  Sending it hasn't been tested.
 
 Your app needs iOS 15 or macOS 13 and Swift 6 language mode. The package ships
 a prebuilt binary, built with Xcode 27.0 (Swift 6.4); older compilers aren't

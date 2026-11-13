@@ -497,7 +497,7 @@ public actor GatewayWalletBackend: WalletBackend {
         let assets = try await listAssets(context: context)
         var pages = [assetLess]
         let assetIDs: [AssetID] = assets.nia.map(\.assetID) + assets.cfa.map(\.assetID)
-            + assets.ifa.map(\.assetID) + assets.uda.map(\.assetID)
+            + assets.ifa.map(\.assetID) + assets.uda.map(\.assetID) + assets.bfa.map(\.assetID)
         for id in assetIDs {
             pages.append(try await listTransferPage(context: context, assetID: id))
         }
