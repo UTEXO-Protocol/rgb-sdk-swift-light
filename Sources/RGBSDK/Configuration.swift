@@ -51,6 +51,10 @@ public struct LocalSigningPolicy: Hashable, Sendable {
     public let maximumOutputs: UInt32
     public let maximumChildIndex: UInt32
     public let rbf: RBFPolicy
+    /// Signs an RGB send that arrives without RGB send evidence, which leaves its RGB
+    /// transitions unverified (blind signing). Only for backends that do not return the
+    /// evidence yet. Evidence that is supplied is always verified, whatever this says.
+    public let allowUnverifiedRGBSends: Bool
 
     public init(
         maximumAbsoluteFee: Satoshis = hardMaximumAbsoluteFee,
@@ -59,7 +63,8 @@ public struct LocalSigningPolicy: Hashable, Sendable {
         maximumInputs: UInt32 = hardMaximumInputs,
         maximumOutputs: UInt32 = hardMaximumOutputs,
         maximumChildIndex: UInt32 = hardMaximumChildIndex,
-        rbf: RBFPolicy = .required
+        rbf: RBFPolicy = .required,
+        allowUnverifiedRGBSends: Bool = false
     ) throws {
         guard (100...Self.hardMaximumPSBTBytes).contains(maximumPSBTBytes) else {
             throw SDKError.invalidArgument(
@@ -101,6 +106,7 @@ public struct LocalSigningPolicy: Hashable, Sendable {
         self.maximumOutputs = maximumOutputs
         self.maximumChildIndex = maximumChildIndex
         self.rbf = rbf
+        self.allowUnverifiedRGBSends = allowUnverifiedRGBSends
     }
 
     public static let `default` = Self(
@@ -129,6 +135,7 @@ public struct LocalSigningPolicy: Hashable, Sendable {
         self.maximumOutputs = maximumOutputs
         self.maximumChildIndex = maximumChildIndex
         self.rbf = rbf
+        allowUnverifiedRGBSends = false
     }
 }
 

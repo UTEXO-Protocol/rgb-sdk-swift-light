@@ -197,7 +197,9 @@ final class PublicGatewayConsumerTests: XCTestCase {
         let url = try await server.start()
         let service = try WalletServiceConfiguration(baseURL: url, apiKeyProvider: credentials,
             allowInsecureLocalDevelopment: true, chainContextProvider: PublicSpendingChainContext())
-        let configuration = try WalletConfiguration(walletID: walletID, network: .regtest)
+        // The PR #174 RGB capture predates RGB send evidence, so it is signed blind.
+        let configuration = try WalletConfiguration(walletID: walletID, network: .regtest,
+            signingPolicy: LocalSigningPolicy(allowUnverifiedRGBSends: true))
         let storage = try WalletStorageConfiguration(directory: directory, keychainService: namespace)
         let wallet = try await UTEXOWallet.create(configuration: configuration, service: service, storage: storage)
         let btc = try SendBtcRequest(address: BitcoinAddress("bcrt1pjyd6wjs2nlefjehddqsvxe8r0ng5r70urvlx72u5fvpsnhs35feqsu7305"),

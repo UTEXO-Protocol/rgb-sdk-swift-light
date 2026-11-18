@@ -427,6 +427,15 @@ let txid = sent.txid
 
 `sent.batchTransferIndex` may be `nil`; use the txid to find the transfer.
 
+Before signing, the device checks where the send moves RGB allocations: only to
+the invoice's receiver, in the asset and amount you approved, or back to this
+wallet. The check needs evidence the gateway returns with the prepared send, and
+the current gateway doesn't return it yet, so `onchainSend` throws
+`policy.rejected`. Until your gateway returns it, open the wallet with
+`signingPolicy: LocalSigningPolicy(allowUnverifiedRGBSends: true)` in
+`WalletConfiguration`. That signs RGB sends without the check, so remove it as
+soon as the gateway returns the evidence.
+
 ### 5. Both wallets sync until the transfer settles
 
 The txid that `onchainSend` returns is not on chain yet. An RGB transfer needs
@@ -554,6 +563,8 @@ covers the rest.
 | The first call fails with `backend.unavailable` | The gateway is still creating a newly registered wallet. Retry the call. |
 | `unlock()` fails with `wallet.key_access_failed` | No seed is stored for this wallet ID under the storage's `keychainService`. Provision it with the same service, or check the user's authentication for a protected seed. |
 | An RGB send, or a blind invoice, fails with `backend.rejected` (`INSUFFICIENT_FUNDS`) while the wallet has BTC | Both need colored UTXOs. Call `createUtxos`, wait for a confirmation, and retry. |
+| An RGB send fails with `policy.rejected` saying it has no RGB send evidence | The gateway didn't return the evidence the device verifies before signing. Set `allowUnverifiedRGBSends` in `LocalSigningPolicy` until it does. |
+| An RGB send fails with `policy.rejected` saying RGB send verification failed | The prepared transaction would move RGB allocations somewhere other than the receiver or this wallet. Don't retry or opt out; report it to the gateway operator. |
 | An incoming transfer stays `.waitingCounterparty` | The receiver hasn't accepted a consignment. Sync the receiver, then the sender. |
 | `UTEXOWallet.create` fails with `storage.operation_journal_unavailable` | The wallet's storage is bound to another gateway URL. Use the original gateway, or a new wallet ID. |
 | `initialize()` or `unlock()` fails with `wallet.invalid_state` for a wallet that worked before | The wallet's storage is bound to another gateway account (`initialize()`) or seed (`unlock()`). Use the original API key and seed, or a new wallet ID. |

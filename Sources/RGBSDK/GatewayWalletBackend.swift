@@ -165,6 +165,8 @@ public actor GatewayWalletBackend: WalletBackend {
     /// Leaves room for signatures under the gateway's 64 KiB complete-body
     /// limit, so an oversized preparation fails before signing or journaling.
     static let maximumPreparedPsbtCharacters = 48 * 1_024
+    static let maximumRGBFasciaCharacters = 512 * 1_024
+    static let maximumRGBProofTransactionCharacters = 200_000
     static let javascriptMaximumSafeInteger: UInt64 = 9_007_199_254_740_991
 
     private let configuration: GatewayBackendConfiguration
@@ -750,7 +752,8 @@ public actor GatewayWalletBackend: WalletBackend {
 
     private func makePrepared(
         _ response: PreparedResponse, context: OperationRequestContext,
-        operation: OperationKind, outputPlan: CreateUtxosOutputPlan? = nil
+        operation: OperationKind, outputPlan: CreateUtxosOutputPlan? = nil,
+        rgbSendEvidence: RGBSendEvidence? = nil
     ) throws -> PreparedTransaction {
         try requireSubmittablePreparedPsbtSize(response.psbt)
         try validateCanonicalBase64(response.psbt, field: "prepared PSBT")
@@ -775,7 +778,8 @@ public actor GatewayWalletBackend: WalletBackend {
             // Flooring is conservative: the client may consider the operation
             // expired up to 999 ms before the gateway does, never after it.
             expiresAt: .init(rawValue: response.expiresAt / 1_000),
-            createUtxosOutputPlan: outputPlan
+            createUtxosOutputPlan: outputPlan,
+            rgbSendEvidence: rgbSendEvidence
         )
     }
 
@@ -810,13 +814,28 @@ public actor GatewayWalletBackend: WalletBackend {
         try requireContext(request.context.backend)
         try validateRequest(.onchainSend(request.request))
         let body = try assetBody(request.request, validateExpiry: true)
-        let response: PreparedResponse = try await post(
+        let response: PreparedAssetResponse = try await post(
             path: "/v1/onchain/send-asset/prepare", body: body, expectedStatusCode: 201,
             idempotency: .init(logicalKey: request.context.idempotencyKey, stage: .prepare))
         try Task.checkCancellation()
         try requireContext(request.context.backend)
-        try validateAssetIntent(response.intent, request: body)
-        return try makePrepared(response, context: request.context, operation: .onchainSend)
+        try validateAssetIntent(response.prepared.intent, request: body)
+        return try makePrepared(
+            response.prepared, context: request.context, operation: .onchainSend,
+            rgbSendEvidence: rgbSendEvidence(response))
+    }
+
+    /// Optional until the gateway returns it. Its absence is not trusted either: the local
+    /// signer refuses an RGB send without evidence unless the signing policy opts out.
+    private func rgbSendEvidence(_ response: PreparedAssetResponse) throws -> RGBSendEvidence? {
+        switch response.rgbEvidence {
+        case nil: return nil
+        case .valid(let evidence): return evidence
+        case .malformed:
+            throw SDKError.backendProtocolMismatch(
+                "gateway RGB send evidence is malformed",
+                operationID: try? gatewayOperationID(response.prepared.opId))
+        }
     }
 
     private func assetBody(_ request: OnchainSendRequest, validateExpiry: Bool) throws -> PrepareSendAssetBody {
@@ -1679,6 +1698,87 @@ private struct PreparedResponse: Decodable {
     let psbt: String
     let intent: PreparedIntent
     let expiresAt: UInt64
+}
+
+/// A send-asset preparation: the common preparation plus the optional `rgbEvidence` object.
+private struct PreparedAssetResponse: Decodable {
+    let prepared: PreparedResponse
+    let rgbEvidence: RGBEvidenceWire?
+
+    private enum CodingKeys: String, CodingKey { case rgbEvidence }
+    init(from decoder: any Decoder) throws {
+        prepared = try PreparedResponse(from: decoder)
+        // A missing key and an explicit null both mean the gateway sent no evidence.
+        rgbEvidence = try decoder.container(keyedBy: CodingKeys.self)
+            .decodeIfPresent(RGBEvidenceWire.self, forKey: .rgbEvidence)
+    }
+}
+
+/// Evidence that is present but malformed is kept as such, so the preparation is refused
+/// with a specific error instead of being treated as evidence-free.
+private enum RGBEvidenceWire: Decodable {
+    case valid(RGBSendEvidence)
+    case malformed
+
+    init(from decoder: any Decoder) throws {
+        self = (try? Self.decode(decoder)).map(Self.valid) ?? .malformed
+    }
+
+    private static func decode(_ decoder: any Decoder) throws -> RGBSendEvidence {
+        let container = try decoder.container(keyedBy: GatewayObjectKey.self)
+        try container.requireExactKeys(["fascia", "mpcEntropy", "existingOutputProofs"])
+        let fascia = try container.decode(String.self, forKey: .init("fascia"))
+        // A u64 exceeds the JSON safe-integer range, so the gateway sends it as decimal text.
+        let entropyText = try container.decode(String.self, forKey: .init("mpcEntropy"))
+        let proofs = try container.decode([RGBExistingOutputProofWire].self, forKey: .init("existingOutputProofs"))
+        guard !fascia.isEmpty, fascia.utf8.count <= GatewayWalletBackend.maximumRGBFasciaCharacters,
+              Data(base64Encoded: fascia)?.base64EncodedString() == fascia,
+              (1...20).contains(entropyText.utf8.count),
+              entropyText.utf8.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }),
+              entropyText == "0" || entropyText.utf8.first != UInt8(ascii: "0"),
+              let entropy = UInt64(entropyText) else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "malformed RGB send evidence"))
+        }
+        return try RGBSendEvidence(
+            fasciaBase64: fascia, mpcEntropy: entropy, existingOutputProofs: proofs.map(\.proof))
+    }
+}
+
+private struct RGBExistingOutputProofWire: Decodable {
+    let proof: RGBExistingOutputProof
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: GatewayObjectKey.self)
+        try container.requireExactKeys(["transaction", "vout", "derivationIndex"])
+        let transaction = try container.decode(String.self, forKey: .init("transaction"))
+        guard transaction.utf8.count <= GatewayWalletBackend.maximumRGBProofTransactionCharacters else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "oversized RGB existing-output proof"))
+        }
+        proof = try RGBExistingOutputProof(
+            transactionHex: transaction,
+            vout: container.decode(UInt32.self, forKey: .init("vout")),
+            derivationIndex: container.decode(UInt32.self, forKey: .init("derivationIndex")))
+    }
+}
+
+/// Decodes an object whose key set is checked as a whole, not field by field.
+private struct GatewayObjectKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(_ stringValue: String) { self.stringValue = stringValue }
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+}
+
+private extension KeyedDecodingContainer where Key == GatewayObjectKey {
+    func requireExactKeys(_ keys: Set<String>) throws {
+        guard Set(allKeys.map(\.stringValue)) == keys else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: codingPath, debugDescription: "unexpected or missing object keys"))
+        }
+    }
 }
 
 private struct OperationStatusResponse: Decodable {

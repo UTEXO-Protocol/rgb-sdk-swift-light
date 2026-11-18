@@ -57,6 +57,41 @@ deployment targets, and includes iOS arm64, simulator arm64/x86_64 and macOS
 arm64/x86_64. Only self-contained public textual interfaces are shipped; private
 compiler modules and C headers are not part of the facade distribution.
 
+## RGB send verifier
+
+The facade also calls `utexo-rgb-verifier`, a second Rust library, before it
+signs an RGB send. Its generated Swift binding, C header and module map are in
+`GeneratedRgbVerifier/`, kept apart from `Generated/` because the signer's
+build receipt hashes that whole directory as its own input. The binding is
+restricted to `package` access like the signer's. The crate's source is bundled
+as [NativeSource/utexo-rgb-verifier-source.tar.gz](NativeSource/utexo-rgb-verifier-source.tar.gz),
+and `SHA256SUMS` lists these four files.
+
+`Artifacts/UtexoRgbVerifier.xcframework` is not checked in yet. Apple libraries
+can only be built on macOS, and this integration was written on Linux. Until it
+is built, `Scripts/verify-source.sh`, `Scripts/build-facade.sh` and
+`node Scripts/facade-provenance.mjs --check` fail on the missing input, and the
+checked-in `RGBSDK.xcframework` contains neither the verifier nor the RGB send
+evidence checks. To build it, extract the source archive and run, from the crate:
+
+```sh
+scripts/build-apple.sh /path/to/rgb-sdk-swift-light/Artifacts
+```
+
+Then run the rebuild steps above. `LocalSigningPolicy` gains
+`allowUnverifiedRGBSends`, so `Scripts/verify-public-api.sh` needs
+`--update-baseline` after the facade is rebuilt. `scripts/build-apple.sh` has not been run
+yet, so treat its first run as its test. It prelinks each slice into one object
+that exports only the verifier's UniFFI symbols, and fails if any other symbol
+is still global. Both Rust libraries embed libsecp256k1, so without that step
+the facade's static archive defines those symbols twice.
+
+The verifier has less evidence than the signer. `artifact-manifest.json`,
+`native-build.json`, the SBOM, the notices and the license review describe the
+signer only. None of them covers the verifier's RGB dependencies
+(`rgb-consensus`, `rgb-ops` and `rgb-invoicing` 0.11.2-rc.1,
+`rgb-strict-encoding`, `amplify`).
+
 `NativeSource/dependencies.json` is the Cargo source/build/test dependency
 inventory and license metadata, not proof of completed vulnerability or legal
 review. Local checksums and locally recorded build metadata are not signed

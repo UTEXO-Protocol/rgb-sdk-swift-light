@@ -6,6 +6,7 @@
 *.a binary
 
 Generated/** linguist-generated=true whitespace=-blank-at-eol,-blank-at-eof
+GeneratedRgbVerifier/** linguist-generated=true whitespace=-blank-at-eol,-blank-at-eof
 Artifacts/** linguist-generated=true
 Artifacts/**/*.h whitespace=-blank-at-eol,-blank-at-eof
 

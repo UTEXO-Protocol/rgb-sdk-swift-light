@@ -14,9 +14,16 @@ let package = Package(
             path: "Generated", exclude: ["UtexoLocalSignerFFI.h", "UtexoLocalSignerFFI.modulemap"],
             sources: ["UtexoLocalSignerBindings.swift"]
         ),
+        // The pre-sign RGB verifier is a separate Rust library with its own bindings.
+        .binaryTarget(name: "UtexoRgbVerifierFFI", path: "Artifacts/UtexoRgbVerifier.xcframework"),
         .target(
-            name: "RGBSDK", dependencies: ["UtexoLocalSignerBindings"], path: "Sources/RGBSDK",
-            resources: [.copy("PrivacyInfo.xcprivacy")]
+            name: "UtexoRgbVerifierBindings", dependencies: ["UtexoRgbVerifierFFI"],
+            path: "GeneratedRgbVerifier", exclude: ["UtexoRgbVerifierFFI.h", "UtexoRgbVerifierFFI.modulemap"],
+            sources: ["UtexoRgbVerifierBindings.swift"]
+        ),
+        .target(
+            name: "RGBSDK", dependencies: ["UtexoLocalSignerBindings", "UtexoRgbVerifierBindings"],
+            path: "Sources/RGBSDK", resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .testTarget(name: "RGBSDKTests", dependencies: ["RGBSDK"], path: "Tests/RGBSDKTests"),
     ],

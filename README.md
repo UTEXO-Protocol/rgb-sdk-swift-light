@@ -309,6 +309,18 @@ For a blinded invoice, omit `witnessData`. For a witness invoice, its satoshi am
 
 Keep invoice transport endpoints intact. The send route requires 1–4 unique endpoints accepted by the gateway; invoices using out-of-band consignment exchange without endpoints are unsupported.
 
+Before signing an RGB send, the SDK verifies its RGB part locally with the `utexo-rgb-verifier` library. The check fails unless every allocation the signature moves goes to the invoice's beneficiary, in the approved asset and amount, or back to this wallet. This needs evidence that the gateway returns with the preparation (`rgbEvidence`), and the current gateway does not return it yet. Until it does, `onchainSend` fails with `policy.rejected` after the gateway has prepared the send, and that preparation is left to expire. To keep sending meanwhile, opt in to signing RGB sends unverified:
+
+```swift
+let configuration = try WalletConfiguration(
+    walletID: walletID,
+    network: .regtest,
+    signingPolicy: LocalSigningPolicy(allowUnverifiedRGBSends: true)
+)
+```
+
+Evidence that arrives is always verified, whatever the flag says. Remove the opt-in once your gateway returns the evidence. `SECURITY.md` describes what the verifier proves and what it does not. The checked-in `RGBSDK.xcframework` predates this check and has to be rebuilt with the verifier before it applies to the binary product; see `NATIVE_ARTIFACTS.md`.
+
 Refresh and inspect the resulting state with `refreshWallet()`, `listAssets()`, `getAssetBalance(assetID:)`, `listUnspents()`, `listTransfers(assetID:)`, `listTransfersByTxid(_:)`, or `listOnchainTransfers(assetID:)`. `listTransfersByTxid(_:)` and `listTransfers()` without an asset ID search every asset, which costs one gateway request per asset. A transaction ID is not a settled RGB transfer; track statuses such as `.waitingCounterparty`, `.waitingConfirmations`, `.settled`, and `.failed`. Optional fields mean unknown, not zero. Both sync and refresh await the gateway's combined Bitcoin sync/RGB refresh; `completedAt` is a client-observed completion time and `tipHeight` is `nil`.
 
 ## 8. Persist payment intents and recover safely

@@ -137,7 +137,13 @@ final class ExampleWallet: ObservableObject {
             keychainService: keychainService
         )
         let open = try await UTEXOWallet.create(
-            configuration: WalletConfiguration(walletID: walletID, network: network),
+            configuration: WalletConfiguration(
+                walletID: walletID, network: network,
+                // The gateway does not return RGB send evidence yet, so RGB sends are
+                // signed without RGB verification. Remove once it does: evidence that
+                // arrives is always verified, and a send without it is then refused.
+                signingPolicy: LocalSigningPolicy(allowUnverifiedRGBSends: true)
+            ),
             service: service,
             storage: storage
         )

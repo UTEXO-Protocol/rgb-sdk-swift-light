@@ -53,6 +53,87 @@ private let rgbTxid = "e41e4ebdc769b0575126a5d728394d4c01206110e7eaebf6446029d5a
     }
 }
 
+@Test func gatewayRGBPrepareCarriesSendEvidenceToTheLocalVerifierAndRejectsMalformedEvidence() async throws {
+    func prepare(_ evidence: Any?) async throws -> PreparedTransaction {
+        let fixture = try await rgbFixture(responses: [try rgbPrepare(evidence: evidence)])
+        return try await fixture.backend.prepareOnchainSend(.init(
+            context: .init(backend: fixture.context, idempotencyKey: fixture.request.idempotencyKey,
+                requestHash: RequestHasher.onchainSend(network: .regtest, request: fixture.request)),
+            request: fixture.request))
+    }
+    let fascia = "ZmFzY2lhLWJ5dGVzLWZvci10ZXN0cw=="
+    let proof: [String: Any] = ["transaction": "02000000", "vout": 1, "derivationIndex": 7]
+    let evidence: [String: Any] = [
+        "fascia": fascia, "mpcEntropy": "18446744073709551615", "existingOutputProofs": [proof]]
+    #expect(
+        try await prepare(evidence).rgbSendEvidence
+            == RGBSendEvidence(fasciaBase64: fascia, mpcEntropy: .max, existingOutputProofs: [
+                RGBExistingOutputProof(transactionHex: "02000000", vout: 1, derivationIndex: 7)]))
+    // Absent evidence is not a verdict: the local signer decides what an evidence-free send means.
+    #expect(try await prepare(nil).rgbSendEvidence == nil)
+    #expect(try await prepare(NSNull()).rgbSendEvidence == nil)
+
+    func changed(_ key: String, _ value: Any?) -> [String: Any] {
+        var copy = evidence
+        if let value { copy[key] = value } else { copy.removeValue(forKey: key) }
+        return copy
+    }
+    func changedProof(_ key: String, _ value: Any) -> [String: Any] {
+        var copy = proof
+        copy[key] = value
+        return changed("existingOutputProofs", [copy])
+    }
+    let malformed: [Any] = [
+        [Any](), [String: Any](), "evidence", 7,
+        changed("mpcEntropy", "18446744073709551616"), changed("mpcEntropy", "007"),
+        changed("mpcEntropy", "+7"), changed("mpcEntropy", ""), changed("mpcEntropy", 42),
+        changed("fascia", "ZmFzY2lhLWJ5dGVzLWZvci10ZXN0cw"), changed("fascia", ""),
+        changed("fascia", String(repeating: "A", count: GatewayWalletBackend.maximumRGBFasciaCharacters + 4)),
+        changedProof("vout", -1), changedProof("vout", 2_147_483_648),
+        changedProof("derivationIndex", 2_147_483_648),
+        changedProof("transaction", "020000ZZ"), changedProof("transaction", "0200000"),
+        changedProof("transaction",
+            String(repeating: "0", count: GatewayWalletBackend.maximumRGBProofTransactionCharacters + 2)),
+        changedProof("script", "51"),
+        changed("existingOutputProofs", nil), changed("existingOutputProofs", proof),
+        changed("existingOutputProofs",
+            Array(repeating: proof, count: RGBSendEvidence.maximumExistingOutputProofs + 1)),
+        changed("verdict", "verified"),
+    ]
+    for (index, value) in malformed.enumerated() {
+        do {
+            _ = try await prepare(value)
+            Issue.record("malformed RGB send evidence \(index) was accepted")
+        } catch let error as SDKError {
+            #expect(error.code == .backendProtocolMismatch, "case \(index)")
+            #expect(error.message.contains("RGB send evidence is malformed"), "case \(index): \(error.message)")
+            #expect(error.operationID?.value == rgbOperationID)
+        }
+    }
+}
+
+@Test func gatewayRGBEvidenceIsVerifiedBeforeSigningEvenWhenBlindSigningIsAllowed() async throws {
+    // Well-formed evidence for another transaction: the fixture wallet opts in to blind
+    // signing, but supplied evidence is always verified and this one cannot pass.
+    let evidence: [String: Any] = [
+        "fascia": RGBVerifierSmokeFixture.fasciaBase64,
+        "mpcEntropy": String(RGBVerifierSmokeFixture.mpcEntropy), "existingOutputProofs": [Any]()]
+    let fixture = try await rgbFixture(responses: [try rgbPrepare(evidence: evidence)])
+    do {
+        _ = try await fixture.perform()
+        Issue.record("an RGB send with failing evidence was signed")
+    } catch let error as SDKError {
+        #expect(error.code == .policyRejected)
+        #expect(error.message.contains("RGB send verification failed"), "\(error.message)")
+    }
+    // Nothing was signed or sent for completion, and the evidence is retained for a retry.
+    #expect(await fixture.transport.snapshot().map(\.url.path) == ["/v1/me", "/v1/onchain/send-asset/prepare"])
+    let checkpoint = try #require(try await fixture.checkpoint())
+    #expect(checkpoint.signedPsbtBase64 == nil)
+    #expect(checkpoint.preparedTransaction?.rgbSendEvidence?.mpcEntropy == RGBVerifierSmokeFixture.mpcEntropy)
+    #expect(try OperationCheckpointCodec.decode(OperationCheckpointCodec.encode(checkpoint)) == checkpoint)
+}
+
 @Test func gatewayRGBOversizedPreparedPsbtFailsBeforeSigningOrJournaling() async throws {
     // Signing this would fail differently; the cap must reject it at prepare.
     let psbt = Data(repeating: 0x42, count: 36_867).base64EncodedString()
@@ -278,7 +359,9 @@ private func rgbFixture(journal: InMemoryOperationJournal = .init(), request: On
         requiresApplicationChainContext: requireProvider), transport: transport, nowMilliseconds: { now * 1_000 })
     let walletID = try WalletID("rgb-transport")
     let session = try await backend.initialize(.init(walletID: walletID, network: .regtest, minimumAPIVersion: 1, maximumAPIVersion: 1))
-    return .init(backend: backend, coordinator: .init(configuration: try .init(walletID: walletID, network: .regtest),
+    // The PR #174 capture carries no RGB send evidence, so these transport flows sign blind.
+    return .init(backend: backend, coordinator: .init(configuration: try .init(walletID: walletID, network: .regtest,
+            signingPolicy: GatewayNativeFixtures.blindRGBPolicy()),
         backend: backend, journal: journal, now: { now }),
         context: .init(session: session, walletID: walletID, network: .regtest),
         request: try request ?? rgbRequest(), journal: journal, transport: transport)
@@ -291,9 +374,12 @@ private func rgbIntent() throws -> [String: Any] {
             "witnessAmountSat": NSNull(), "transportEndpoints": invoice.transportEndpoints]]
 }
 
-private func rgbPrepare(intent: [String: Any]? = nil, psbt: String = GatewayNativeFixtures.rgb) throws -> GatewayHTTPResponse {
-    try rgbWire(["opId": rgbOperationID, "psbt": psbt,
-        "intent": intent ?? rgbIntent(), "expiresAt": 2_000_000], status: 201)
+private func rgbPrepare(intent: [String: Any]? = nil, psbt: String = GatewayNativeFixtures.rgb,
+    evidence: Any? = nil) throws -> GatewayHTTPResponse {
+    var body: [String: Any] = ["opId": rgbOperationID, "psbt": psbt,
+        "intent": try intent ?? rgbIntent(), "expiresAt": 2_000_000]
+    if let evidence { body["rgbEvidence"] = evidence }
+    return try rgbWire(body, status: 201)
 }
 
 private func rgbStatus(state: String, txid: String? = nil) throws -> GatewayHTTPResponse {
