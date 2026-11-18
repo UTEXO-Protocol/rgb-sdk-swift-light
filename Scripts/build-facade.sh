@@ -14,6 +14,9 @@ mkdir -p "${SDK_DIR}/.build"
 STAGE="$(mktemp -d "${SDK_DIR}/.build/facade-stage.XXXXXX")"
 node "${SCRIPT_DIR}/facade-provenance.mjs" --snapshot "${STAGE}/inputs.json"
 NATIVE="${SDK_DIR}/Artifacts/UtexoLocalSigner.xcframework"
+# The pre-sign RGB verifier: built by utexo-rgb-verifier's scripts/build-apple.sh,
+# which leaves only its UniFFI symbols global so it can share a binary with the signer.
+VERIFIER="${SDK_DIR}/Artifacts/UtexoRgbVerifier.xcframework"
 OUTPUT="${SDK_DIR}/Artifacts/RGBSDK.xcframework"
 export SWIFT_MODULECACHE_PATH="${STAGE}/module-cache"
 export CLANG_MODULE_CACHE_PATH="${STAGE}/clang-cache"
@@ -23,7 +26,7 @@ export ZERO_AR_DATE=1
 
 build_arch() {
     local sdk="$1" triple="$2" slice="$3" arch="$4" platform="$5" minimum="$6"
-    local work="${STAGE}/${triple}" sdk_path framework native_library
+    local work="${STAGE}/${triple}" sdk_path framework native_library verifier_library
     sdk_path="$(xcrun --sdk "${sdk}" --show-sdk-path)"
     framework="${STAGE}/${slice}/RGBSDK.framework"
     mkdir -p "${work}" "${framework}/Modules/RGBSDK.swiftmodule"
@@ -33,6 +36,12 @@ build_arch() {
     else
         lipo "${NATIVE}/${slice}/libutexo_local_signer.a" -thin "${arch}" -output "${native_library}"
     fi
+    verifier_library="${work}/verifier.a"
+    if [[ "$(lipo -archs "${VERIFIER}/${slice}/libutexo_rgb_verifier.a")" == "${arch}" ]]; then
+        cp "${VERIFIER}/${slice}/libutexo_rgb_verifier.a" "${verifier_library}"
+    else
+        lipo "${VERIFIER}/${slice}/libutexo_rgb_verifier.a" -thin "${arch}" -output "${verifier_library}"
+    fi
     local common=(-target "${triple}" -sdk "${sdk_path}" -swift-version 6 -O
         -parse-as-library -whole-module-optimization -enable-library-evolution
         -package-name UtexoSDKBuild -module-cache-path "${SWIFT_MODULECACHE_PATH}"
@@ -41,14 +50,19 @@ build_arch() {
         -I "${NATIVE}/${slice}/Headers" \
         -emit-module -emit-module-path "${work}/UtexoLocalSignerBindings.swiftmodule" \
         -emit-object -o "${work}/Bindings.o" "${SDK_DIR}/Generated/UtexoLocalSignerBindings.swift"
+    xcrun swiftc "${common[@]}" -module-name UtexoRgbVerifierBindings \
+        -I "${VERIFIER}/${slice}/Headers" \
+        -emit-module -emit-module-path "${work}/UtexoRgbVerifierBindings.swiftmodule" \
+        -emit-object -o "${work}/VerifierBindings.o" \
+        "${SDK_DIR}/GeneratedRgbVerifier/UtexoRgbVerifierBindings.swift"
     xcrun swiftc "${common[@]}" -module-name RGBSDK -I "${work}" \
-        -I "${NATIVE}/${slice}/Headers" \
+        -I "${NATIVE}/${slice}/Headers" -I "${VERIFIER}/${slice}/Headers" \
         -emit-module -emit-module-path "${work}/RGBSDK.swiftmodule" \
         -emit-module-interface-path "${work}/RGBSDK.swiftinterface" \
         -emit-object -o "${work}/RGBSDK.o" "${SDK_DIR}"/Sources/RGBSDK/*.swift
     # Ship only self-contained public textual interfaces, never serialized
     # compiler modules/private interfaces that refer to internal build modules.
-    if rg -q 'UtexoLocalSigner|@testable|@_spi' "${work}/RGBSDK.swiftinterface"; then
+    if rg -q 'UtexoLocalSigner|UtexoRgbVerifier|@testable|@_spi' "${work}/RGBSDK.swiftinterface"; then
         echo "error: implementation API leaked into public Swift interface" >&2
         exit 1
     fi
@@ -56,7 +70,8 @@ build_arch() {
     module_triple="${arch}-apple-${platform}"
     cp "${work}/RGBSDK.swiftinterface" "${framework}/Modules/RGBSDK.swiftmodule/${module_triple}.swiftinterface"
     xcrun libtool -static -o "${work}/RGBSDK.a" \
-        "${work}/RGBSDK.o" "${work}/Bindings.o" "${native_library}"
+        "${work}/RGBSDK.o" "${work}/Bindings.o" "${work}/VerifierBindings.o" \
+        "${native_library}" "${verifier_library}"
     cp "${SDK_DIR}/Sources/RGBSDK/PrivacyInfo.xcprivacy" "${framework}/PrivacyInfo.xcprivacy"
     /usr/libexec/PlistBuddy -c 'Clear dict' -c 'Add :CFBundleIdentifier string org.utexo.RGBSDK' \
         -c 'Add :CFBundleName string RGBSDK' -c 'Add :CFBundleExecutable string RGBSDK' \

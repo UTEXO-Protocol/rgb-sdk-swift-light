@@ -24,7 +24,8 @@ function inventory(paths) {
   return result;
 }
 const inputPaths = [
-  'Sources', 'Generated', 'Artifacts/UtexoLocalSigner.xcframework',
+  'Sources', 'Generated', 'GeneratedRgbVerifier',
+  'Artifacts/UtexoLocalSigner.xcframework', 'Artifacts/UtexoRgbVerifier.xcframework',
   'Package.source.swift', 'Scripts/build-facade.sh', 'Scripts/facade-provenance.mjs',
 ];
 const [mode, snapshotPath] = process.argv.slice(2);

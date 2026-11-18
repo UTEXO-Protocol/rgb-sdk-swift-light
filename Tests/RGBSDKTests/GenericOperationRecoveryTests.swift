@@ -99,7 +99,8 @@ import Testing
     for create in [true, false] {
         let fixture = try GenericOperationFixture(create: create)
         let signed = try fixture.request.validateAndSign(
-            signer: fixture.signer, prepared: fixture.prepared, policy: .default, now: 1_800_000_000)
+            signer: fixture.signer, prepared: fixture.prepared,
+            policy: GatewayNativeFixtures.blindRGBPolicy(), now: 1_800_000_000)
         try await fixture.journal.save(
             .init(
                 walletID: fixture.context.walletID,
@@ -159,7 +160,8 @@ import Testing
         )
         #expect(throws: SDKError.self) {
             try fixture.request.validateAndSign(
-                signer: fixture.signer, prepared: wrong, policy: .default, now: 1_800_000_000)
+                signer: fixture.signer, prepared: wrong,
+                policy: GatewayNativeFixtures.blindRGBPolicy(), now: 1_800_000_000)
         }
     }
 }
@@ -245,8 +247,11 @@ private struct GenericOperationFixture {
     func perform(
         now: UInt64 = 1_800_000_001, signerOverride: (any LocalSigningEngine)? = nil
     ) async throws -> BackendOperationResult {
+        // The PR #174 RGB capture carries no RGB send evidence, so it is signed blind.
         let coordinator = OperationCoordinator(
-            configuration: try WalletConfiguration(walletID: context.walletID, network: .regtest),
+            configuration: try WalletConfiguration(
+                walletID: context.walletID, network: .regtest,
+                signingPolicy: GatewayNativeFixtures.blindRGBPolicy()),
             backend: backend, journal: journal, now: { now })
         switch request {
         case .createUtxos(let r):

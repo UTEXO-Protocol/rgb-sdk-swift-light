@@ -98,6 +98,24 @@ otherwise acceptable Bitcoin transaction. Consequently:
 - Enabled RGB money movement relies on server-side RGB validation and state.
   Bitcoin-level validation does not make these operations trustless.
 
+Before signing or revalidating an RGB send, the gateway signer runs
+`utexo-rgb-verifier` on the evidence the backend returns with the preparation:
+rgb-lib's fascia, the MPC entropy of its commitment, and ownership proofs for
+existing UTXOs used as seals. The verifier proves that the transaction's single
+`OP_RETURN` commits to exactly the disclosed transitions, and that every
+allocation they move goes to the invoice's beneficiary, in the approved asset
+and amount, or back to a seal derived from this wallet's colored account. A
+backend therefore cannot redirect allocations, including RGB change, to itself.
+It can still destroy them. The verifier does not validate RGB history, cannot
+see allocations left out of the fascia, and does not check that an
+existing-UTXO seal is still unspent.
+
+A preparation without evidence is refused unless
+`LocalSigningPolicy.allowUnverifiedRGBSends` is set. With that opt-in a
+malicious backend can redirect allocations from selected colored inputs,
+including RGB change, even when the Bitcoin transaction satisfies local policy.
+The current gateway does not return the evidence yet, so the example app opts in.
+
 ## Key custody
 
 On Apple platforms, use `KeychainSeedStore` or an equivalently reviewed

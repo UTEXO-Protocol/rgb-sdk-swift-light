@@ -17,26 +17,28 @@ PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/utexo-boundary.XXXXXX")"
 swift run --disable-sandbox --package-path "${FIXTURE_DIR}" \
     --scratch-path "${PROBE_DIR}/build" FacadeConsumer
 
-if swift build --disable-sandbox --package-path "${FIXTURE_DIR}" --target ForbiddenBindingsConsumer \
-    --scratch-path "${PROBE_DIR}/build" > "${PROBE_DIR}/bindings.log" 2>&1; then
-    echo "error: generated UniFFI Swift API is externally callable" >&2
-    exit 1
-fi
-if ! rg -q "no such module 'UtexoLocalSignerBindings'|unable to resolve module dependency: 'UtexoLocalSignerBindings'" "${PROBE_DIR}/bindings.log"; then
-    echo "error: wrapper negative consumer failed for an unexpected reason" >&2
-    cat "${PROBE_DIR}/bindings.log" >&2
-    exit 1
-fi
+# require_unavailable <negative-consumer-target> <private-module> <what-leaked>
+require_unavailable() {
+    local target="$1" module="$2" leak="$3" log="${PROBE_DIR}/$1.log"
+    if swift build --disable-sandbox --package-path "${FIXTURE_DIR}" --target "${target}" \
+        --scratch-path "${PROBE_DIR}/build" > "${log}" 2>&1; then
+        echo "error: ${leak}" >&2
+        exit 1
+    fi
+    if ! rg -q "no such module '${module}'|unable to resolve module dependency: '${module}'" "${log}"; then
+        echo "error: ${target} failed for an unexpected reason" >&2
+        cat "${log}" >&2
+        exit 1
+    fi
+}
 
-if swift build --disable-sandbox --package-path "${FIXTURE_DIR}" --target ForbiddenFFIConsumer \
-    --scratch-path "${PROBE_DIR}/build" > "${PROBE_DIR}/ffi.log" 2>&1; then
-    echo "error: raw C FFI module remains transitively importable" >&2
-    exit 1
-fi
-if ! rg -q "no such module 'UtexoLocalSignerFFI'|unable to resolve module dependency: 'UtexoLocalSignerFFI'" "${PROBE_DIR}/ffi.log"; then
-    echo "error: raw C negative consumer failed for an unexpected reason" >&2
-    cat "${PROBE_DIR}/ffi.log" >&2
-    exit 1
-fi
+require_unavailable ForbiddenBindingsConsumer UtexoLocalSignerBindings \
+    "generated UniFFI Swift API is externally callable"
+require_unavailable ForbiddenFFIConsumer UtexoLocalSignerFFI \
+    "raw C FFI module remains transitively importable"
+require_unavailable ForbiddenVerifierBindingsConsumer UtexoRgbVerifierBindings \
+    "generated RGB verifier Swift API is externally callable"
+require_unavailable ForbiddenVerifierFFIConsumer UtexoRgbVerifierFFI \
+    "raw RGB verifier C FFI module remains transitively importable"
 
 echo "Facade consumer runs; private Swift and raw C modules are unavailable. Logs: ${PROBE_DIR}"

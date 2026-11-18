@@ -17,6 +17,11 @@ enum GatewayNativeFixtures {
     static let rgbInvoice =
         "rgb:9p3aZVvS-e886rs0-7XWD2vq-uh0GutQ-eK6o4xd-X29gYGo/~/~/bcrt:utxob:rrenuOZq-sm2KkQo-w_ksB_K-ESeK4vF-N79kMAi-suQX4q2-J1tYQ?endpoints=rpc://proxy:3000/json-rpc"
 
+    /// The PR #174 RGB capture predates RGB send evidence, so it can only be signed blind.
+    static func blindRGBPolicy() throws -> LocalSigningPolicy {
+        try LocalSigningPolicy(allowUnverifiedRGBSends: true)
+    }
+
     static func signer(height: UInt32 = 110, gateway: Bool = true) throws -> any LocalSigningEngine {
         let mnemonic = try SecretMnemonic(
             copyingUTF8: Array(
@@ -115,21 +120,37 @@ enum GatewayNativeFixtures {
         feeRate: FeeRate(satsPerVByte: 2))
     let prepared = try GatewayNativeFixtures.prepared(.onchainSend(request), psbt: GatewayNativeFixtures.rgb)
     let signer = try GatewayNativeFixtures.signer()
+    let blind = try GatewayNativeFixtures.blindRGBPolicy()
     let signed = try signer.validateAndSignOnchainSend(
-        prepared: prepared, request: request, policy: .default, now: 1_800_000_000)
+        prepared: prepared, request: request, policy: blind, now: 1_800_000_000)
     #expect(
         signed.validation.unsignedTxid.hex
             == "e41e4ebdc769b0575126a5d728394d4c01206110e7eaebf6446029d5acd0d814")
     #expect(signed.validation.fee.value == 309 && signed.validation.opReturnCount == 1)
     #expect(!signer.capabilities.localRGBValidation)
     try signer.validateOnchainSendBeforeSubmission(
-        prepared: prepared, request: request, policy: .default, retainedValidation: signed.validation,
+        prepared: prepared, request: request, policy: blind, retainedValidation: signed.validation,
         now: 1_800_000_001)
+    // Without the explicit opt-in, a send with no RGB evidence is neither signed nor resubmitted.
+    for rejected in [
+        { _ = try signer.validateAndSignOnchainSend(
+            prepared: prepared, request: request, policy: .default, now: 1_800_000_000) },
+        { try signer.validateOnchainSendBeforeSubmission(
+            prepared: prepared, request: request, policy: .default,
+            retainedValidation: signed.validation, now: 1_800_000_001) },
+    ] {
+        do {
+            try rejected()
+            Issue.record("expected an evidence-free RGB send to be refused")
+        } catch let error as SDKError {
+            #expect(error.code == .policyRejected && error.message.contains("no RGB send evidence"))
+        }
+    }
     let changed = try OnchainSendRequest(
         invoice: request.invoice, amount: AssetAmount(41), feeRate: request.feeRate)
     #expect(throws: SDKError.self) {
         try signer.validateAndSignOnchainSend(
-            prepared: prepared, request: changed, policy: .default, now: 1_800_000_000)
+            prepared: prepared, request: changed, policy: blind, now: 1_800_000_000)
     }
     // An RGB commitment cannot enter the ordinary BTC operation path.
     let btc = try SendBtcRequest(

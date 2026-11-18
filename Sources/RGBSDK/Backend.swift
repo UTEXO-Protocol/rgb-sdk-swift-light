@@ -309,6 +309,80 @@ public struct CreateUtxosOutputPlan: Hashable, Sendable {
     }
 }
 
+/// An existing colored UTXO that an RGB send assigns state to (rgb-lib's change seal when
+/// the send has no Bitcoin change output), with the transaction that created it. The
+/// verifier re-derives the output's script from the wallet's keys; nothing here is trusted.
+@_spi(Backend)
+public struct RGBExistingOutputProof: Hashable, Sendable, CustomStringConvertible {
+    public static let maximumTransactionHexCharacters = 400_000
+
+    public let transactionHex: String
+    public let vout: UInt32
+    public let derivationIndex: UInt32
+
+    public init(transactionHex: String, vout: UInt32, derivationIndex: UInt32) throws {
+        guard !transactionHex.isEmpty,
+              transactionHex.utf8.count <= Self.maximumTransactionHexCharacters,
+              isASCIIHex(transactionHex, exactByteCount: transactionHex.utf8.count, lowercaseOnly: true),
+              transactionHex.utf8.count.isMultiple(of: 2) else {
+            throw SDKError.invalidArgument("transactionHex", "must be bounded lowercase hex")
+        }
+        // The checkpoint encoding shared with the Kotlin SDK stores both as signed 32-bit values.
+        guard vout <= UInt32(Int32.max) else {
+            throw SDKError.invalidArgument("vout", "must not exceed \(Int32.max)")
+        }
+        guard derivationIndex <= UInt32(Int32.max) else {
+            throw SDKError.invalidArgument("derivationIndex", "must not exceed \(Int32.max)")
+        }
+        self.transactionHex = transactionHex
+        self.vout = vout
+        self.derivationIndex = derivationIndex
+    }
+
+    public var description: String {
+        "RGBExistingOutputProof(transaction=[REDACTED], vout=\(vout), derivationIndex=\(derivationIndex))"
+    }
+}
+
+/// What the device needs to verify an RGB send before signing it: rgb-lib's fascia (the
+/// strict-encoded bundles the transaction commits to), the MPC entropy of that commitment,
+/// and ownership proofs for existing UTXOs used as seals. All of it comes from the backend
+/// and is checked by `utexo-rgb-verifier`, never trusted.
+@_spi(Backend)
+public struct RGBSendEvidence: Hashable, Sendable, CustomStringConvertible {
+    public static let maximumFasciaBase64Characters = 4_000_000
+    public static let maximumExistingOutputProofs = 8
+
+    public let fasciaBase64: String
+    public let mpcEntropy: UInt64
+    public let existingOutputProofs: [RGBExistingOutputProof]
+
+    public init(
+        fasciaBase64: String,
+        mpcEntropy: UInt64,
+        existingOutputProofs: [RGBExistingOutputProof] = []
+    ) throws {
+        guard try requireBoundedText(
+            fasciaBase64, field: "fascia", maximumUTF8Bytes: Self.maximumFasciaBase64Characters
+        ) == fasciaBase64 else {
+            throw SDKError.invalidArgument("fascia", "must not contain surrounding whitespace")
+        }
+        guard existingOutputProofs.count <= Self.maximumExistingOutputProofs else {
+            throw SDKError.invalidArgument(
+                "existingOutputProofs",
+                "must contain at most \(Self.maximumExistingOutputProofs) proofs"
+            )
+        }
+        self.fasciaBase64 = fasciaBase64
+        self.mpcEntropy = mpcEntropy
+        self.existingOutputProofs = existingOutputProofs
+    }
+
+    public var description: String {
+        "RGBSendEvidence(fascia=[REDACTED], existingOutputProofs=\(existingOutputProofs.count))"
+    }
+}
+
 /// Infrastructure-only carrier. Its description deliberately redacts the PSBT.
 @_spi(Backend)
 public struct PreparedTransaction: Hashable, Sendable, CustomStringConvertible {
@@ -321,6 +395,8 @@ public struct PreparedTransaction: Hashable, Sendable, CustomStringConvertible {
     public let expiresAt: UnixSeconds
     public let createUtxosOutputPlan: CreateUtxosOutputPlan?
     public let correlationID: String?
+    /// Present only for an RGB send whose backend supplies what the device needs to verify it.
+    public let rgbSendEvidence: RGBSendEvidence?
 
     public init(
         operationID: OperationID,
@@ -331,7 +407,8 @@ public struct PreparedTransaction: Hashable, Sendable, CustomStringConvertible {
         psbtBase64: String,
         expiresAt: UnixSeconds,
         createUtxosOutputPlan: CreateUtxosOutputPlan? = nil,
-        correlationID: String? = nil
+        correlationID: String? = nil,
+        rgbSendEvidence: RGBSendEvidence? = nil
     ) throws {
         self.operationID = operationID
         self.idempotencyKey = idempotencyKey
@@ -342,11 +419,15 @@ public struct PreparedTransaction: Hashable, Sendable, CustomStringConvertible {
         self.expiresAt = expiresAt
         self.createUtxosOutputPlan = createUtxosOutputPlan
         self.correlationID = correlationID
+        self.rgbSendEvidence = rgbSendEvidence
         guard (operation == .createUtxos) == (createUtxosOutputPlan != nil) else {
             throw SDKError.invalidArgument(
                 "createUtxosOutputPlan",
                 "must be present only for createUtxos operations"
             )
+        }
+        guard rgbSendEvidence == nil || operation == .onchainSend else {
+            throw SDKError.invalidArgument("rgbSendEvidence", "must be present only for RGB sends")
         }
     }
 

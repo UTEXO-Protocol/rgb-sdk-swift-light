@@ -12,9 +12,12 @@ import Foundation
 @_spi(Backend)
 public enum OperationCheckpointCodec {
     /// Full-record wire version, retained for existing infrastructure clients.
-    /// Compact terminal receipts use version 2; decode accepts both versions.
+    /// Compact terminal receipts use version 2 and full records carrying RGB send
+    /// evidence use version 3; decode accepts all three versions.
     public static let schemaVersion: UInt32 = 1
     static let compactTerminalSchemaVersion: UInt32 = 2
+    /// Schema v1 plus RGB send evidence; used only when a preparation carries it.
+    static let rgbEvidenceSchemaVersion: UInt32 = 3
     public static let maximumEncodedBytes = 16_000_000
 
     private static let checksumBytes = 32
@@ -28,8 +31,9 @@ public enum OperationCheckpointCodec {
                 writer.append(compactTerminalSchemaVersion)
                 try writer.appendCompactTerminal(checkpoint)
             } else {
-                writer.append(schemaVersion)
-                try writer.append(checkpoint)
+                let rgbEvidence = checkpoint.preparedTransaction?.rgbSendEvidence != nil
+                writer.append(rgbEvidence ? rgbEvidenceSchemaVersion : schemaVersion)
+                try writer.append(checkpoint, withRGBEvidence: rgbEvidence)
             }
             let body = writer.data
             guard body.count <= maximumEncodedBytes - checksumBytes else {
@@ -66,7 +70,8 @@ public enum OperationCheckpointCodec {
             }
             let checkpoint: OperationCheckpoint
             switch try reader.readUInt32() {
-            case schemaVersion: checkpoint = try reader.readCheckpoint()
+            case schemaVersion: checkpoint = try reader.readCheckpoint(withRGBEvidence: false)
+            case rgbEvidenceSchemaVersion: checkpoint = try reader.readCheckpoint(withRGBEvidence: true)
             case compactTerminalSchemaVersion: checkpoint = try reader.readCompactTerminal()
             default: throw SDKError.operationJournalUnavailable
             }
@@ -98,7 +103,7 @@ private struct CheckpointWriter {
         try append(outcome)
     }
 
-    mutating func append(_ checkpoint: OperationCheckpoint) throws {
+    mutating func append(_ checkpoint: OperationCheckpoint, withRGBEvidence: Bool) throws {
         try append(checkpoint.walletID.value, maximumBytes: 128)
         try append(checkpoint.idempotencyKey.value, maximumBytes: 128)
         try append(checkpoint.requestHash.hex, maximumBytes: 64)
@@ -108,7 +113,7 @@ private struct CheckpointWriter {
             try writer.append(value.value, maximumBytes: 128)
         }
         try appendOptional(checkpoint.preparedTransaction) { writer, value in
-            try writer.append(value)
+            try writer.append(value, withRGBEvidence: withRGBEvidence)
         }
         if let signedPsbtBase64 = checkpoint.signedPsbtBase64,
            let validation = checkpoint.validation {
@@ -123,7 +128,7 @@ private struct CheckpointWriter {
         }
     }
 
-    private mutating func append(_ prepared: PreparedTransaction) throws {
+    private mutating func append(_ prepared: PreparedTransaction, withRGBEvidence: Bool) throws {
         try append(prepared.operationID.value, maximumBytes: 128)
         try append(prepared.idempotencyKey.value, maximumBytes: 128)
         try append(prepared.requestHash.hex, maximumBytes: 64)
@@ -145,6 +150,22 @@ private struct CheckpointWriter {
         }
         try appendOptional(prepared.correlationID) { writer, value in
             try writer.append(value, maximumBytes: 128)
+        }
+        if withRGBEvidence {
+            try appendOptional(prepared.rgbSendEvidence) { writer, value in try writer.append(value) }
+        }
+    }
+
+    private mutating func append(_ evidence: RGBSendEvidence) throws {
+        try append(evidence.fasciaBase64, maximumBytes: RGBSendEvidence.maximumFasciaBase64Characters)
+        // The entropy is a full-range u64, stored as its raw eight bytes like Kotlin's Long.
+        append(evidence.mpcEntropy)
+        append(UInt32(evidence.existingOutputProofs.count))
+        for proof in evidence.existingOutputProofs {
+            try append(
+                proof.transactionHex, maximumBytes: RGBExistingOutputProof.maximumTransactionHexCharacters)
+            append(proof.vout)
+            append(proof.derivationIndex)
         }
     }
 
@@ -273,7 +294,7 @@ private struct CheckpointReader {
         )
     }
 
-    mutating func readCheckpoint() throws -> OperationCheckpoint {
+    mutating func readCheckpoint(withRGBEvidence: Bool) throws -> OperationCheckpoint {
         let walletID = try WalletID(readString(maximumBytes: 128))
         let idempotencyKey = try IdempotencyKey(readString(maximumBytes: 128))
         let requestHash = try RequestHash(validating: readString(maximumBytes: 64))
@@ -284,7 +305,9 @@ private struct CheckpointReader {
         let operationID = try readOptional { reader in
             try OperationID(reader.readString(maximumBytes: 128))
         }
-        let prepared = try readOptional { reader in try reader.readPreparedTransaction() }
+        let prepared = try readOptional { reader in
+            try reader.readPreparedTransaction(withRGBEvidence: withRGBEvidence)
+        }
         let signed: (String, LocalValidationReport)? = try readOptional { reader in
             (
                 try reader.readString(maximumBytes: 5_400_000),
@@ -295,6 +318,10 @@ private struct CheckpointReader {
         // V1 never represented compact receipts. Keep its historical shape
         // strict, and reserve omission of terminal payloads for version 2.
         guard phase == .created || prepared != nil else {
+            throw SDKError.operationJournalUnavailable
+        }
+        // Schema v3 is used exactly for RGB send evidence, so each record has one encoding.
+        guard withRGBEvidence == (prepared?.rgbSendEvidence != nil) else {
             throw SDKError.operationJournalUnavailable
         }
         return try OperationCheckpoint(
@@ -311,7 +338,7 @@ private struct CheckpointReader {
         )
     }
 
-    private mutating func readPreparedTransaction() throws -> PreparedTransaction {
+    private mutating func readPreparedTransaction(withRGBEvidence: Bool) throws -> PreparedTransaction {
         let operationID = try OperationID(readString(maximumBytes: 128))
         let idempotencyKey = try IdempotencyKey(readString(maximumBytes: 128))
         let requestHash = try RequestHash(validating: readString(maximumBytes: 64))
@@ -345,6 +372,8 @@ private struct CheckpointReader {
         let correlationID = try readOptional { reader in
             try reader.readString(maximumBytes: 128)
         }
+        let rgbSendEvidence = withRGBEvidence
+            ? try readOptional { reader in try reader.readRGBSendEvidence() } : nil
         return try PreparedTransaction(
             operationID: operationID,
             idempotencyKey: idempotencyKey,
@@ -354,8 +383,31 @@ private struct CheckpointReader {
             psbtBase64: psbtBase64,
             expiresAt: .init(rawValue: expiresAt),
             createUtxosOutputPlan: outputPlan,
-            correlationID: correlationID
+            correlationID: correlationID,
+            rgbSendEvidence: rgbSendEvidence
         )
+    }
+
+    private mutating func readRGBSendEvidence() throws -> RGBSendEvidence {
+        let fascia = try readString(maximumBytes: RGBSendEvidence.maximumFasciaBase64Characters)
+        let entropy = try readUInt64()
+        let count = try readUInt32()
+        guard count <= UInt32(RGBSendEvidence.maximumExistingOutputProofs) else {
+            throw SDKError.operationJournalUnavailable
+        }
+        var proofs: [RGBExistingOutputProof] = []
+        proofs.reserveCapacity(Int(count))
+        for _ in 0..<count {
+            proofs.append(
+                try RGBExistingOutputProof(
+                    transactionHex: readString(
+                        maximumBytes: RGBExistingOutputProof.maximumTransactionHexCharacters),
+                    vout: readUInt32(),
+                    derivationIndex: readUInt32()
+                )
+            )
+        }
+        return try RGBSendEvidence(fasciaBase64: fascia, mpcEntropy: entropy, existingOutputProofs: proofs)
     }
 
     private mutating func readValidation() throws -> LocalValidationReport {
@@ -474,10 +526,14 @@ private struct CheckpointReader {
     }
 
     private mutating func readNonnegativeLong() throws -> UInt64 {
-        let bytes = try readData(count: 8)
-        let value = bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        let value = try readUInt64()
         guard value <= UInt64(Int64.max) else { throw SDKError.operationJournalUnavailable }
         return value
+    }
+
+    private mutating func readUInt64() throws -> UInt64 {
+        let bytes = try readData(count: 8)
+        return bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
 }
 

@@ -116,6 +116,8 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
             localTransactionValidation: true,
             localTransactionSigning: !gatewayProfile || gatewaySigningAvailable,
             localRGBInvoiceParsing: true,
+            // RGB sends are checked by utexo-rgb-verifier before signing (RGBSendVerification),
+            // but RGB history is not validated locally, so this stays false.
             localRGBValidation: false,
             localSigningOperations: gatewayProfile
                 ? (gatewaySigningAvailable ? [.sendBtc, .createUtxos, .onchainSend] : []) : [.sendBtc],
@@ -358,19 +360,46 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
     func validateAndSignOnchainSend(
         prepared: PreparedTransaction, request: OnchainSendRequest, policy: LocalSigningPolicy, now: UInt64
     ) throws -> LocalSigningResult {
-        try signGatewayOperation(
-            prepared: prepared,
-            intent: rgbIntent(prepared: prepared, request: request, policy: policy, now: now))
+        let intent = try rgbIntent(prepared: prepared, request: request, policy: policy, now: now)
+        let verified = try verifyRGBSend(prepared: prepared, intent: intent, policy: policy)
+        let signed = try signGatewayOperation(prepared: prepared, intent: intent)
+        try requireVerifiedTransaction(verified, signed.validation)
+        return signed
     }
 
     func validateOnchainSendBeforeSubmission(
         prepared: PreparedTransaction, request: OnchainSendRequest, policy: LocalSigningPolicy,
         retainedValidation: LocalValidationReport, now: UInt64
     ) throws {
-        try validateGatewayOperation(
-            prepared: prepared,
-            intent: rgbIntent(prepared: prepared, request: request, policy: policy, now: now),
-            retained: retainedValidation)
+        let intent = try rgbIntent(prepared: prepared, request: request, policy: policy, now: now)
+        let verified = try verifyRGBSend(prepared: prepared, intent: intent, policy: policy)
+        let report = try validateGatewayOperation(
+            prepared: prepared, intent: intent, retained: retainedValidation)
+        try requireVerifiedTransaction(verified, report)
+    }
+
+    /// Runs after the preparation is bound to the caller's request and before any signature
+    /// or revalidation. Nil only for a blind send the policy explicitly allows.
+    private func verifyRGBSend(
+        prepared: PreparedTransaction, intent: UtexoLocalSignerBindings.GatewaySigningIntent,
+        policy: LocalSigningPolicy
+    ) throws -> TransactionID? {
+        guard let evidence = try RGBSendVerification.requireEvidence(prepared, policy: policy) else {
+            return nil
+        }
+        // The invoice, asset and amount are the caller's, as bound into the signing intent.
+        guard let rgb = intent.rgb else { throw SDKError.invariant("RGB send has no RGB authorization") }
+        return try RGBSendVerification.verify(
+            network: network, identity: identity(), prepared: prepared, evidence: evidence,
+            invoice: rgb.invoice, assetID: rgb.assetId, amount: rgb.amount, policy: policy)
+    }
+
+    private func requireVerifiedTransaction(
+        _ verified: TransactionID?, _ validation: LocalValidationReport
+    ) throws {
+        if let verified, verified != validation.unsignedTxid {
+            throw SDKError.invariant("RGB verification and Bitcoin signing saw different transactions")
+        }
     }
 
     private func createIntent(
@@ -474,15 +503,17 @@ private final class NativeLocalSigningEngine: LocalSigningEngine, @unchecked Sen
         }
     }
 
+    @discardableResult
     private func validateGatewayOperation(
         prepared: PreparedTransaction, intent: UtexoLocalSignerBindings.GatewaySigningIntent,
         retained: LocalValidationReport
-    ) throws {
+    ) throws -> LocalValidationReport {
         do {
             let report = try signer.validateGatewayPsbt(psbtBase64: prepared.psbtBase64, intent: intent).sdk
             guard report.matchesTransactionEvidence(retained) else {
                 throw SDKError.invariant("retained signing evidence no longer matches preparation")
             }
+            return report
         } catch let error as SDKError { throw error } catch {
             throw mapSignerError(error, operationID: prepared.operationID)
         }

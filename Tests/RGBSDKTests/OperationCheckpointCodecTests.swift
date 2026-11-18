@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable @_spi(Backend) import RGBSDK
@@ -205,6 +206,63 @@ import Testing
     }
 }
 
+private func codecEvidence() throws -> RGBSendEvidence {
+    try RGBSendEvidence(
+        fasciaBase64: "ZmFzY2lhLWJ5dGVzLWZvci10ZXN0cw==", mpcEntropy: .max,
+        existingOutputProofs: [
+            RGBExistingOutputProof(transactionHex: "02000000", vout: 1, derivationIndex: 7),
+            RGBExistingOutputProof(transactionHex: "0300", vout: 0, derivationIndex: 0),
+        ])
+}
+
+/// Replaces the big-endian schema version after the 8-byte magic and re-seals the digest.
+private func reencoded(_ encoded: Data, schema: UInt8) -> Data {
+    var body = Data(encoded.dropLast(32))
+    body[body.startIndex + 11] = schema
+    body.append(contentsOf: SHA256.hash(data: body))
+    return body
+}
+
+private func schemaVersion(_ encoded: Data) -> UInt32 {
+    encoded.dropFirst(8).prefix(4).reduce(0) { ($0 << 8) | UInt32($1) }
+}
+
+@Test func rgbSendEvidenceSurvivesARestartInSchemaV3WhileEvidenceFreePreparationsStayV1() throws {
+    let fixture = try CodecFixture()
+    let evidence = try codecEvidence()
+    let encoded = try OperationCheckpointCodec.encode(fixture.preparedRGBSend(evidence))
+    #expect(schemaVersion(encoded) == 3)
+    let decoded = try OperationCheckpointCodec.decode(encoded)
+    #expect(decoded.preparedTransaction?.rgbSendEvidence == evidence)
+    #expect(try OperationCheckpointCodec.encode(decoded) == encoded)
+
+    let blind = try OperationCheckpointCodec.encode(fixture.preparedRGBSend(nil))
+    #expect(schemaVersion(blind) == 1)
+    let decodedBlind = try OperationCheckpointCodec.decode(blind)
+    #expect(decodedBlind.preparedTransaction != nil && decodedBlind.preparedTransaction?.rgbSendEvidence == nil)
+    // Each record has one encoding: v3 is used exactly for RGB send evidence.
+    for noncanonical in [reencoded(blind, schema: 3), reencoded(encoded, schema: 1)] {
+        do {
+            _ = try OperationCheckpointCodec.decode(noncanonical)
+            Issue.record("expected a non-canonical schema version to be rejected")
+        } catch let error as SDKError { #expect(error.code == .operationJournalUnavailable) }
+    }
+    // Evidence survives signing; a compact terminal receipt drops it with the preparation.
+    let signed = try fixture.terminalRGBSend(evidence)
+    let signedEncoded = try OperationCheckpointCodec.encode(signed)
+    #expect(schemaVersion(signedEncoded) == 3)
+    #expect(try OperationCheckpointCodec.decode(signedEncoded) == signed)
+    #expect(try schemaVersion(OperationCheckpointCodec.encode(signed.compactTerminal)) == 2)
+}
+
+@Test func preparedRGBSendWithEvidenceMatchesCrossPlatformV3Golden() throws {
+    let checkpoint = try CodecFixture().preparedRGBSend(codecEvidence())
+    let expected = "VVRYT1BDSEsAAAADAAAACHdhbGxldC0xAAAADWlkZW1wb3RlbmN5LTEAAABAZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAAAAtvbmNoYWluU2VuZAAAAAhwcmVwYXJlZAEAAAALb3BlcmF0aW9uLTEBAAAAC29wZXJhdGlvbi0xAAAADWlkZW1wb3RlbmN5LTEAAABAZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAAAAZzaWduZXQAAAALb25jaGFpblNlbmQAAAANcHJlcGFyZWQtcHNidAAAAAAAAAfQAAEAAAANY29ycmVsYXRpb24tMQEAAAAgWm1GelkybGhMV0o1ZEdWekxXWnZjaTEwWlhOMGN3PT3//////////wAAAAIAAAAIMDIwMDAwMDAAAAABAAAABwAAAAQwMzAwAAAAAAAAAAAAALEF8Xqk/evs6Zx4PxchSET4Egk42GQc2hO4MH3lMBle"
+    let encoded = try OperationCheckpointCodec.encode(checkpoint)
+    #expect(encoded.base64EncodedString() == expected)
+    #expect(try OperationCheckpointCodec.decode(#require(Data(base64Encoded: expected))) == checkpoint)
+}
+
 private struct CodecFixture {
     let walletID: WalletID
     let idempotencyKey: IdempotencyKey
@@ -244,6 +302,29 @@ private struct CodecFixture {
             outputCount: 2,
             opReturnCount: 0
         )
+    }
+
+    private func rgbSendPreparation(_ evidence: RGBSendEvidence?) throws -> PreparedTransaction {
+        try PreparedTransaction(
+            operationID: operationID, idempotencyKey: idempotencyKey, requestHash: requestHash,
+            network: .signet, operation: .onchainSend, psbtBase64: "prepared-psbt",
+            expiresAt: .init(rawValue: 2_000), correlationID: "correlation-1", rgbSendEvidence: evidence)
+    }
+
+    func preparedRGBSend(_ evidence: RGBSendEvidence?) throws -> OperationCheckpoint {
+        try OperationCheckpoint(
+            walletID: walletID, idempotencyKey: idempotencyKey, requestHash: requestHash,
+            operationKind: .onchainSend, phase: .prepared, operationID: operationID,
+            preparedTransaction: rgbSendPreparation(evidence))
+    }
+
+    func terminalRGBSend(_ evidence: RGBSendEvidence?) throws -> OperationCheckpoint {
+        try OperationCheckpoint(
+            walletID: walletID, idempotencyKey: idempotencyKey, requestHash: requestHash,
+            operationKind: .onchainSend, phase: .terminal, operationID: operationID,
+            preparedTransaction: rgbSendPreparation(evidence), signedPsbtBase64: "signed-psbt",
+            validation: validation,
+            terminalOutcome: .succeeded(.onchainSend(operationID: operationID, result: .init(txid: txid))))
     }
 
     func terminal(outcome: OperationTerminalOutcome) throws -> OperationCheckpoint {

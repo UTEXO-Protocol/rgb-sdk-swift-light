@@ -27,5 +27,17 @@ let package = Package(
                 .product(name: "RGBSDK", package: "rgb-sdk-swift-light"),
             ]
         ),
+        .executableTarget(
+            name: "ForbiddenVerifierBindingsConsumer",
+            dependencies: [
+                .product(name: "RGBSDK", package: "rgb-sdk-swift-light"),
+            ]
+        ),
+        .executableTarget(
+            name: "ForbiddenVerifierFFIConsumer",
+            dependencies: [
+                .product(name: "RGBSDK", package: "rgb-sdk-swift-light"),
+            ]
+        ),
     ]
 )

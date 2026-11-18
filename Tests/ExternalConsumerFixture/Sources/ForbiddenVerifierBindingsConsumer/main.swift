@@ -1,0 +1,3 @@
+import UtexoRgbVerifierBindings
+
+_ = verifierProfile()
